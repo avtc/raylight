@@ -46,6 +46,10 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
 
         patches = self.patches[key]
         if is_quantized(weight):
+            if key not in self.backup:
+                self.backup[key] = collections.namedtuple('Dimension', ['weight', 'inplace_update'])(
+                    weight, inplace_update
+                )
             out_weight = weight.to(device_to)
             patches = move_patch_to_device(patches, self.load_device if self.patch_on_device else self.offload_device)
             # TODO: do we ever have legitimate duplicate patches? (i.e. patch on top of patched weight)
