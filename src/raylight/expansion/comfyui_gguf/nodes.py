@@ -88,11 +88,9 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
         # GPU tensors to private CPU memory (~16GB per worker), breaking mmap sharing.
         mmap_backup = getattr(self, '_mmap_param_backup', None)
         if mmap_backup:
-            restored_count = 0
             for name, param in self.model.named_parameters():
                 if name in mmap_backup:
                     param.data = mmap_backup[name]
-                    restored_count += 1
             # Move only non-mmap-backed params to offload device
             if device_to is not None:
                 for name, param in self.model.named_parameters():
@@ -108,17 +106,6 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
             # already moved params above.
             super().unpatch_model(device_to=None, unpatch_weights=unpatch_weights)
 
-            # Diagnostics: log memory state after unpatch
-            try:
-                import psutil
-                rss_gb = psutil.Process().memory_info().rss / (1024**3)
-                gpu_mb = torch.cuda.memory_allocated() / (1024**2) if torch.cuda.is_available() else 0
-                logging.info(
-                    f"[mmap] unpatch_model done: restored {restored_count}/{len(mmap_backup)} params, "
-                    f"RSS={rss_gb:.1f}GB, GPU={gpu_mb:.0f}MB"
-                )
-            except ImportError:
-                logging.info(f"[mmap] unpatch_model done: restored {restored_count}/{len(mmap_backup)} params")
             return
 
         # Fallback: no mmap backup available
@@ -145,8 +132,6 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
             # would create private ~16GB copies per worker.
             if not hasattr(self, '_mmap_param_backup') or self._mmap_param_backup is None:
                 self._mmap_param_backup = {}
-                quant_count = 0
-                compat_count = 0
                 for name, param in self.model.named_parameters():
                     # Save ALL mmap-backed params (both quantized and F16/F32),
                     # not just quantized ones. F16/F32 GGMLTensor params are also
@@ -154,11 +139,6 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
                     # them with GPU copies.
                     if isinstance(param.data, GGMLTensor):
                         self._mmap_param_backup[name] = param.data
-                        if is_quantized(param.data):
-                            quant_count += 1
-                        else:
-                            compat_count += 1
-                logging.info(f"[mmap] backup created: {quant_count} quantized, {compat_count} torch-compatible GGMLTensor params")
 
         # always call `patch_weight_to_device` even for lowvram
         super().load(*args, force_patch_weights=True, **kwargs)
