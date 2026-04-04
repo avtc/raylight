@@ -91,12 +91,20 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
             for name, param in self.model.named_parameters():
                 if name in mmap_backup:
                     param.data = mmap_backup[name]
-            self.backup.clear()
             # Move only non-quantized params to offload device (quantized are already on CPU via mmap)
             if device_to is not None:
                 for name, param in self.model.named_parameters():
                     if name not in mmap_backup:
                         param.data = param.data.to(device_to)
+            # Clear backup so super() skips weight restoration (already done above).
+            # Also clear self.backup which may contain GPU tensor references from
+            # patch_weight_to_device — keeping them would prevent GC of GPU memory.
+            self.backup.clear()
+            # Delegate all other cleanup to super() (hooks, pins, lowvram state,
+            # comfy_patched_weights flags, memory tracking, object patches).
+            # Pass device_to=None so super() skips model.to(device_to) since we
+            # already moved params above.
+            super().unpatch_model(device_to=None, unpatch_weights=unpatch_weights)
             return
 
         # Fallback: no mmap backup available
