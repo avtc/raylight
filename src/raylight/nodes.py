@@ -149,7 +149,6 @@ class RayInitializer:
                 "ray_cluster_address": ("STRING", {"default": "local", "tooltip": "Address of Ray cluster to connect to. Use local for single-machine."}),
                 "ray_cluster_namespace": ("STRING", {"default": "default", "tooltip": "Namespace for Ray cluster isolation."}),
                 "GPU": ("INT", {"default": 2, "tooltip": "Number of GPUs to use for distributed processing."}),
-                "group_size": ("INT", {"default": 1, "min": 1, "tooltip": "Number of GPUs per FSDP group. 1 = pure DP (current behavior). 2 = pairs. Must divide GPU count evenly."}),
                 "ulysses_degree": ("INT", {"default": 2, "tooltip": "Ulysses parallelism degree. Divide GPUs across sequence dimension."}),
                 "ring_degree": ("INT", {"default": 1, "tooltip": "Ring attention parallelism degree. Divide GPUs across ring dimension."}),
                 "cfg_degree": ("INT", {"default": 1, "tooltip": "CFG parallelism degree. Divide GPUs across conditional/unconditional batches."}),
@@ -160,6 +159,7 @@ class RayInitializer:
                     [member.name for member in AttnType],
                     {"default": "TORCH_FLASH", "tooltip": "Attention backend to use in inference"},
                 ),
+                "FSDP_group_size": ("INT", {"default": 1, "min": 1, "tooltip": "Number of GPUs per FSDP group. 1 = pure DP (current behavior). 2 = pairs. Must divide GPU count evenly."}),
             }
         }
 
@@ -174,7 +174,7 @@ class RayInitializer:
         ray_cluster_address: str,
         ray_cluster_namespace: str,
         GPU: int,
-        group_size: int,
+        FSDP_group_size: int,
         ulysses_degree: int,
         ring_degree: int,
         cfg_degree: int,
@@ -217,21 +217,21 @@ class RayInitializer:
             raise ValueError(f"ERROR, num_gpus: {world_size}, is lower than {ulysses_degree=} x {ring_degree=} x {cfg_degree=}")
         if cfg_degree > 2:
             raise ValueError("CFG batch only can be divided into 2 degree of parallelism, since its dimension is only 2")
-        if group_size > 1 and not FSDP:
-            raise ValueError("group_size > 1 requires FSDP to be enabled. FSDP shards the model within each group.")
-        if GPU % group_size != 0:
-            raise ValueError(f"GPU count ({GPU}) must be evenly divisible by group_size ({group_size})")
-        num_groups = GPU // group_size
+        if FSDP_group_size > 1 and not FSDP:
+            raise ValueError("FSDP_group_size > 1 requires FSDP to be enabled. FSDP shards the model within each group.")
+        if GPU % FSDP_group_size != 0:
+            raise ValueError(f"GPU count ({GPU}) must be evenly divisible by FSDP_group_size ({FSDP_group_size})")
+        num_groups = GPU // FSDP_group_size
 
         self.parallel_dict["is_xdit"] = False
         self.parallel_dict["is_fsdp"] = False
         self.parallel_dict["sync_ulysses"] = False
         self.parallel_dict["global_world_size"] = world_size
-        self.parallel_dict["group_size"] = group_size
+        self.parallel_dict["FSDP_group_size"] = FSDP_group_size
         self.parallel_dict["num_groups"] = num_groups
 
-        if group_size > 1:
-            self.parallel_dict["global_world_size"] = group_size
+        if FSDP_group_size > 1:
+            self.parallel_dict["global_world_size"] = FSDP_group_size
 
         if ulysses_degree > 0 or ring_degree > 0 or cfg_degree > 0:
             if ulysses_degree * ring_degree * cfg_degree == 0:
@@ -314,7 +314,6 @@ class RayInitializerAdvanced(RayInitializer):
                 ),
                 "torch_dist_address": ("STRING", {"default": "127.0.0.1:29500", "tooltip": "Might need to restart ComfyUI to apply"}),
                 "GPU": ("INT", {"default": 2, "tooltip": "Number of GPUs to use for distributed processing."}),
-                "group_size": ("INT", {"default": 1, "min": 1, "tooltip": "Number of GPUs per FSDP group. 1 = pure DP. 2 = pairs."}),
                 "ulysses_degree": ("INT", {"default": 2, "tooltip": "Ulysses parallelism degree. Divide GPUs across sequence dimension."}),
                 "ring_degree": ("INT", {"default": 1, "tooltip": "Ring attention parallelism degree. Divide GPUs across ring dimension."}),
                 "cfg_degree": ("INT", {"default": 1, "tooltip": "CFG parallelism degree. Divide GPUs across conditional/unconditional batches."}),
@@ -325,6 +324,7 @@ class RayInitializerAdvanced(RayInitializer):
                     [member.name for member in AttnType],
                     {"default": "TORCH_FLASH", "tooltip": "Attention backend to use in inference"},
                 ),
+                "FSDP_group_size": ("INT", {"default": 1, "min": 1, "tooltip": "Number of GPUs per FSDP group. 1 = pure DP. 2 = pairs."}),
             }
         }
 
@@ -397,7 +397,7 @@ class RayUNETLoader:
         loaded_futures = []
 
         if parallel_dict["is_fsdp"] is True:
-            group_size = parallel_dict.get("group_size", 1)
+            group_size = parallel_dict.get("FSDP_group_size", 1)
             num_groups = parallel_dict.get("num_groups", len(gpu_actors))
 
             if group_size <= 1:
@@ -703,7 +703,7 @@ class DPKSamplerAdvanced:
             """
             )
 
-        group_size = parallel_dict.get("group_size", 1)
+        group_size = parallel_dict.get("FSDP_group_size", 1)
         num_groups = parallel_dict.get("num_groups", len(gpu_actors))
 
         if group_size <= 1:

@@ -55,7 +55,7 @@ class RayWorker:
 
         self.local_rank = local_rank
         self.global_world_size = self.parallel_dict["global_world_size"]
-        self.group_size = self.parallel_dict.get("group_size", 1)
+        self.group_size = self.parallel_dict.get("FSDP_group_size", 1)
         self.group_id = self.parallel_dict.get("group_id", 0)
 
         self.device_id = device_id
@@ -644,7 +644,7 @@ def ray_nccl_tester(world_size):
 
 
 def make_ray_actor_fn(world_size, parallel_dict):
-    group_size = parallel_dict.get("group_size", 1)
+    group_size = parallel_dict.get("FSDP_group_size", 1)
     num_groups = parallel_dict.get("num_groups", world_size)
 
     def _init_ray_actor(world_size=world_size, parallel_dict=parallel_dict):

@@ -340,7 +340,7 @@ class DPSamplerCustom:
         comfy.model_management.soft_empty_cache()
         gpu_actors = ray_actors["workers"]
         parallel_dict = ray.get(gpu_actors[0].get_parallel_dict.remote())
-        group_size = parallel_dict.get("group_size", 1)
+        group_size = parallel_dict.get("FSDP_group_size", 1)
         num_groups = parallel_dict.get("num_groups", len(gpu_actors))
 
         if group_size <= 1:
