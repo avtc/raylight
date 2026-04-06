@@ -703,46 +703,105 @@ class DPKSamplerAdvanced:
             """
             )
 
-        if len(latent_image) != len(gpu_actors):
-            latent_image = [latent_image[0]] * len(gpu_actors)
-        if len(positive) == 1:
-            positive = positive * len(gpu_actors)
-        if len(negative) == 1:
-            negative = negative * len(gpu_actors)
+        group_size = parallel_dict.get("group_size", 1)
+        num_groups = parallel_dict.get("num_groups", len(gpu_actors))
 
-        # Clean VRAM for preparation to load model
-        gc.collect()
-        comfy.model_management.unload_all_models()
-        comfy.model_management.soft_empty_cache()
-        force_full_denoise = True
-        if return_with_leftover_noise == "enable":
-            force_full_denoise = False
-        disable_noise = False
-        if add_noise == "disable":
-            disable_noise = True
+        if group_size <= 1:
+            # Original flat DP mode — backward compatible
+            if len(latent_image) != len(gpu_actors):
+                latent_image = [latent_image[0]] * len(gpu_actors)
+            if len(positive) == 1:
+                positive = positive * len(gpu_actors)
+            if len(negative) == 1:
+                negative = negative * len(gpu_actors)
 
-        futures = [
-            actor.common_ksampler.remote(
-                noise_list[i],
-                steps,
-                cfg,
-                sampler_name,
-                scheduler,
-                positive[i],
-                negative[i],
-                latent_image[i],
-                denoise=denoise,
-                disable_noise=disable_noise,
-                start_step=start_at_step,
-                last_step=end_at_step,
-                force_full_denoise=force_full_denoise,
-            )
-            for i, actor in enumerate(gpu_actors)
-        ]
+            # Clean VRAM for preparation to load model
+            gc.collect()
+            comfy.model_management.unload_all_models()
+            comfy.model_management.soft_empty_cache()
+            force_full_denoise = True
+            if return_with_leftover_noise == "enable":
+                force_full_denoise = False
+            disable_noise = False
+            if add_noise == "disable":
+                disable_noise = True
 
-        results = ray.get(futures)
-        results = [result[0] for result in results]
-        return (results,)
+            futures = [
+                actor.common_ksampler.remote(
+                    noise_list[i],
+                    steps,
+                    cfg,
+                    sampler_name,
+                    scheduler,
+                    positive[i],
+                    negative[i],
+                    latent_image[i],
+                    denoise=denoise,
+                    disable_noise=disable_noise,
+                    start_step=start_at_step,
+                    last_step=end_at_step,
+                    force_full_denoise=force_full_denoise,
+                )
+                for i, actor in enumerate(gpu_actors)
+            ]
+
+            results = ray.get(futures)
+            results = [result[0] for result in results]
+            return (results,)
+        else:
+            # Grouped DP+FSDP mode
+            # Auto-replicate: if fewer items than groups, fill remaining
+            if len(latent_image) != num_groups:
+                latent_image = [latent_image[0]] * num_groups
+            if len(positive) == 1:
+                positive = positive * num_groups
+            if len(negative) == 1:
+                negative = negative * num_groups
+            if len(noise_list) != num_groups:
+                noise_list = [noise_list[0]] * num_groups
+
+            # Clean VRAM for preparation to load model
+            gc.collect()
+            comfy.model_management.unload_all_models()
+            comfy.model_management.soft_empty_cache()
+            force_full_denoise = True
+            if return_with_leftover_noise == "enable":
+                force_full_denoise = False
+            disable_noise = False
+            if add_noise == "disable":
+                disable_noise = True
+
+            # Dispatch to ALL workers, mapping group inputs
+            futures = []
+            for i, actor in enumerate(gpu_actors):
+                group_id = i // group_size
+                futures.append(
+                    actor.common_ksampler.remote(
+                        noise_list[group_id],
+                        steps,
+                        cfg,
+                        sampler_name,
+                        scheduler,
+                        positive[group_id],
+                        negative[group_id],
+                        latent_image[group_id],
+                        denoise=denoise,
+                        disable_noise=disable_noise,
+                        start_step=start_at_step,
+                        last_step=end_at_step,
+                        force_full_denoise=force_full_denoise,
+                    )
+                )
+
+            results = ray.get(futures)
+
+            # Collect only rank 0 results from each group
+            group_results = []
+            for group_id in range(num_groups):
+                rank0_index = group_id * group_size
+                group_results.append(results[rank0_index][0])
+
+            return (group_results,)
 
 
 class Noise_RandomNoise:
