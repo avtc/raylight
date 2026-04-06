@@ -758,7 +758,10 @@ class DPKSamplerAdvanced:
             if len(negative) == 1:
                 negative = negative * num_groups
             if len(noise_list) != num_groups:
-                noise_list = [noise_list[0]] * num_groups
+                if len(noise_list) >= num_groups:
+                    noise_list = noise_list[:num_groups]
+                else:
+                    noise_list = [noise_list[0]] * num_groups
 
             # Clean VRAM for preparation to load model
             gc.collect()

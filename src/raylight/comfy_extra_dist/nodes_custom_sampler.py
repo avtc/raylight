@@ -372,7 +372,10 @@ class DPSamplerCustom:
             if len(negative) == 1:
                 negative = negative * num_groups
             if len(noise_list) != num_groups:
-                noise_list = [noise_list[0]] * num_groups
+                if len(noise_list) >= num_groups:
+                    noise_list = noise_list[:num_groups]
+                else:
+                    noise_list = [noise_list[0]] * num_groups
 
             futures = []
             for i, actor in enumerate(gpu_actors):
