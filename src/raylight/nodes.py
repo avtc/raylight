@@ -397,30 +397,66 @@ class RayUNETLoader:
         loaded_futures = []
 
         if parallel_dict["is_fsdp"] is True:
-            if parallel_dict["is_quant"] is False:
-                worker0 = ray.get_actor("RayWorker:0")
-                ray.get(worker0.load_unet.remote(unet_path, model_options=model_options))
-                meta_model = ray.get(worker0.get_meta_model.remote())
+            group_size = parallel_dict.get("group_size", 1)
+            num_groups = parallel_dict.get("num_groups", len(gpu_actors))
 
-                for actor in gpu_actors:
-                    if actor != worker0:
-                        loaded_futures.append(actor.set_meta_model.remote(meta_model))
+            if group_size <= 1:
+                # Original flat FSDP — backward compatible
+                if parallel_dict["is_quant"] is False:
+                    worker0 = ray.get_actor("RayWorker:0")
+                    ray.get(worker0.load_unet.remote(unet_path, model_options=model_options))
+                    meta_model = ray.get(worker0.get_meta_model.remote())
 
-                ray.get(loaded_futures)
-                loaded_futures = []
+                    for actor in gpu_actors:
+                        if actor != worker0:
+                            loaded_futures.append(actor.set_meta_model.remote(meta_model))
 
-                for actor in gpu_actors:
-                    loaded_futures.append(actor.set_state_dict.remote())
+                    ray.get(loaded_futures)
+                    loaded_futures = []
+
+                    for actor in gpu_actors:
+                        loaded_futures.append(actor.set_state_dict.remote())
+
+                else:
+                    for actor in gpu_actors:
+                        loaded_futures.append(actor.load_unet.remote(unet_path, model_options=model_options))
+
+                    ray.get(loaded_futures)
+                    loaded_futures = []
+
+                    for actor in gpu_actors:
+                        loaded_futures.append(actor.set_state_dict.remote())
 
             else:
-                for actor in gpu_actors:
-                    loaded_futures.append(actor.load_unet.remote(unet_path, model_options=model_options))
+                # Grouped FSDP — load model per group
+                for group_id in range(num_groups):
+                    group_actors = gpu_actors[group_id * group_size : (group_id + 1) * group_size]
 
-                ray.get(loaded_futures)
-                loaded_futures = []
+                    if parallel_dict["is_quant"] is False:
+                        rank0_name = f"RayWorker:{group_id}_0"
+                        worker0 = ray.get_actor(rank0_name)
+                        ray.get(worker0.load_unet.remote(unet_path, model_options=model_options))
+                        meta_model = ray.get(worker0.get_meta_model.remote())
 
-                for actor in gpu_actors:
-                    loaded_futures.append(actor.set_state_dict.remote())
+                        for actor in group_actors:
+                            if actor != worker0:
+                                loaded_futures.append(actor.set_meta_model.remote(meta_model))
+
+                        ray.get(loaded_futures)
+                        loaded_futures = []
+
+                        for actor in group_actors:
+                            loaded_futures.append(actor.set_state_dict.remote())
+
+                    else:
+                        for actor in group_actors:
+                            loaded_futures.append(actor.load_unet.remote(unet_path, model_options=model_options))
+
+                        ray.get(loaded_futures)
+                        loaded_futures = []
+
+                        for actor in group_actors:
+                            loaded_futures.append(actor.set_state_dict.remote())
 
             ray.get(loaded_futures)
             loaded_futures = []
