@@ -55,6 +55,8 @@ class RayWorker:
 
         self.local_rank = local_rank
         self.global_world_size = self.parallel_dict["global_world_size"]
+        self.group_size = self.parallel_dict.get("group_size", 1)
+        self.group_id = self.parallel_dict.get("group_id", 0)
 
         self.device_id = device_id
         self.parallel_dict = parallel_dict
@@ -69,19 +71,31 @@ class RayWorker:
         os.environ["NCCL_DEBUG"] = "WARN"
         os.environ["CUDA_VISIBLE_DEVICES"] = str(self.device_id)
 
+        # Determine effective world_size for NCCL
+        if self.group_size > 1:
+            nccl_world_size = self.group_size
+            nccl_rank = local_rank
+        else:
+            nccl_world_size = self.global_world_size
+            nccl_rank = local_rank
+
+        # Each group gets its own port for NCCL isolation
+        base_port = int(os.environ.get("MASTER_PORT", "29500"))
+        group_port = base_port + self.group_id
+
         dist.init_process_group(
             "nccl",
-            rank=local_rank,
-            world_size=self.global_world_size,
+            rank=nccl_rank,
+            world_size=nccl_world_size,
             timeout=timedelta(minutes=1),
-            # device_id=self.device
+            init_method=f"tcp://127.0.0.1:{group_port}",
         )
 
         # (TODO-Komikndr) Should be modified so it can do support DP on top of FSDP
         if self.parallel_dict["is_xdit"] or self.parallel_dict["is_fsdp"]:
-            self.device_mesh = dist.device_mesh.init_device_mesh("cuda", mesh_shape=(self.global_world_size,))
+            self.device_mesh = dist.device_mesh.init_device_mesh("cuda", mesh_shape=(nccl_world_size,))
         else:
-            print(f"Running Ray in normal seperate sampler with: {self.global_world_size} number of workers")
+            print(f"Running Ray in normal seperate sampler with: {nccl_world_size} number of workers")
 
         # From mochi-xdit, xdit, pipelines.py
         if self.parallel_dict["is_xdit"]:
