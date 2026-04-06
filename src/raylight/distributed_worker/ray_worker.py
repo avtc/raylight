@@ -630,19 +630,43 @@ def ray_nccl_tester(world_size):
 
 
 def make_ray_actor_fn(world_size, parallel_dict):
+    group_size = parallel_dict.get("group_size", 1)
+    num_groups = parallel_dict.get("num_groups", world_size)
+
     def _init_ray_actor(world_size=world_size, parallel_dict=parallel_dict):
         ray_actors = dict()
         gpu_actor = ray.remote(RayWorker)
         gpu_actors = []
 
-        for local_rank in range(world_size):
-            gpu_actors.append(
-                gpu_actor.options(num_gpus=1, name=f"RayWorker:{local_rank}").remote(
-                    local_rank=local_rank,
-                    device_id=0,
-                    parallel_dict=parallel_dict,
+        if group_size <= 1:
+            # Original flat DP mode — backward compatible
+            for local_rank in range(world_size):
+                gpu_actors.append(
+                    gpu_actor.options(num_gpus=1, name=f"RayWorker:{local_rank}").remote(
+                        local_rank=local_rank,
+                        device_id=0,
+                        parallel_dict=parallel_dict,
+                    )
                 )
-            )
+        else:
+            # Grouped DP+FSDP mode
+            for group_id in range(num_groups):
+                # Each group gets its own parallel_dict copy with group_id
+                group_parallel_dict = dict(parallel_dict)
+                group_parallel_dict["group_id"] = group_id
+
+                for local_rank in range(group_size):
+                    gpu_actors.append(
+                        gpu_actor.options(
+                            num_gpus=1,
+                            name=f"RayWorker:{group_id}_{local_rank}"
+                        ).remote(
+                            local_rank=local_rank,
+                            device_id=0,
+                            parallel_dict=group_parallel_dict,
+                        )
+                    )
+
         ray_actors["workers"] = gpu_actors
 
         for actor in ray_actors["workers"]:
