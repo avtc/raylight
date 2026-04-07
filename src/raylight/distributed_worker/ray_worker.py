@@ -42,6 +42,7 @@ from ray.exceptions import RayActorError
 # Comfy cli args, does not get pass through into ray actor
 class RayWorker:
     def __init__(self, local_rank, device_id, parallel_dict):
+        self._patch_config_getattr()
         self.model = None
         self.vae_model = None
         self.model_type = None
@@ -124,6 +125,27 @@ class RayWorker:
             )
             print(f"Parallel Degree: Ulysses={self.ulysses_degree}, Ring={self.ring_degree}, CFG={self.cfg_degree}")
 
+    @staticmethod
+    def _patch_config_getattr():
+        """Fix BASE.__getattr__ so cloudpickle doesn't lose instance attrs.
+
+        comfy.supported_models_base.BASE.__getattr__ returns None for
+        missing attributes instead of raising AttributeError.  When cloudpickle
+        checks hasattr(obj, '__getstate__'), it gets True (None is
+        truthy after being warned about).  This causes cloudpickle to
+        serialize the state as None, losing all instance-level
+        unet_config keys on deserialization.
+        """
+        from comfy import supported_models_base
+        orig = supported_models_base.BASE.__getattr__
+
+        def _safe(self, name):
+            if name.startswith('__') and name.endswith('__'):
+                raise AttributeError(name)
+            return orig(self, name)
+
+        supported_models_base.BASE.__getattr__ = _safe
+
     def get_meta_model(self):
         first_param_device = next(self.model.model.parameters()).device
         if first_param_device == torch.device("meta"):
@@ -146,6 +168,9 @@ class RayWorker:
             print(f"[DEBUG set_meta_model rank={self.local_rank}] out_channels: {_c.unet_config.get('out_channels', 'MISSING')}")
             print(f"[DEBUG set_meta_model rank={self.local_rank}] unet_config keys: {sorted(_c.unet_config.keys())}")
             print(f"[DEBUG set_meta_model rank={self.local_rank}] has instance unet_config: {'unet_config' in _c.__dict__}")
+
+            self._fix_model_config(model)
+
             self.state_dict = None
             self.model = model
             self.model.config_fsdp(self.local_rank, self.device_mesh)
