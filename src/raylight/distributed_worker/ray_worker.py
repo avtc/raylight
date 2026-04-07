@@ -42,6 +42,8 @@ from ray.exceptions import RayActorError
 # Comfy cli args, does not get pass through into ray actor
 class RayWorker:
     def __init__(self, local_rank, device_id, parallel_dict):
+        from raylight.nodes import _monkey
+        _monkey()
         self.model = None
         self.vae_model = None
         self.model_type = None

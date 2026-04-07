@@ -25,6 +25,14 @@ from .distributed_worker.ray_worker import (
 # Workaround https://github.com/comfyanonymous/ComfyUI/pull/11134
 # since in FSDPModelPatcher mode, ray cannot pickle None type cause by getattr
 def _monkey():
+    """Patch BASE.__getattr__ to raise AttributeError for dunder methods.
+
+    ComfyUI's BASE.__getattr__ returns None for missing attributes.
+    When cloudpickle checks hasattr(obj, '__getstate__') it gets None
+    (truthy), then calls None() → loses instance attrs or TypeError.
+    Raising AttributeError for dunder methods makes cloudpickle fall back
+    to __dict__-based (de)serialization.
+    """
     import comfy.supported_models_base as supported_models_base
 
     def _safe_getattr(self, name):
