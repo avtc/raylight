@@ -127,6 +127,12 @@ class RayWorker:
     def get_meta_model(self):
         first_param_device = next(self.model.model.parameters()).device
         if first_param_device == torch.device("meta"):
+            # DEBUG: check config BEFORE Ray transfer
+            _c = self.model.model.model_config
+            print(f"[DEBUG get_meta_model rank={self.local_rank}] config type: {type(_c).__name__}")
+            print(f"[DEBUG get_meta_model rank={self.local_rank}] out_channels: {_c.unet_config.get('out_channels', 'MISSING')}")
+            print(f"[DEBUG get_meta_model rank={self.local_rank}] unet_config keys: {sorted(_c.unet_config.keys())}")
+            print(f"[DEBUG get_meta_model rank={self.local_rank}] has instance unet_config: {'unet_config' in _c.__dict__}")
             return self.model
         else:
             raise ValueError("Model recieved is not meta, can cause OOM in large model")
@@ -134,6 +140,12 @@ class RayWorker:
     def set_meta_model(self, model):
         first_param_device = next(model.model.parameters()).device
         if first_param_device == torch.device("meta"):
+            # DEBUG: check config AFTER Ray transfer
+            _c = model.model.model_config
+            print(f"[DEBUG set_meta_model rank={self.local_rank}] config type: {type(_c).__name__}")
+            print(f"[DEBUG set_meta_model rank={self.local_rank}] out_channels: {_c.unet_config.get('out_channels', 'MISSING')}")
+            print(f"[DEBUG set_meta_model rank={self.local_rank}] unet_config keys: {sorted(_c.unet_config.keys())}")
+            print(f"[DEBUG set_meta_model rank={self.local_rank}] has instance unet_config: {'unet_config' in _c.__dict__}")
             self.state_dict = None
             self.model = model
             self.model.config_fsdp(self.local_rank, self.device_mesh)
