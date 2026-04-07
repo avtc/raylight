@@ -169,8 +169,6 @@ class RayWorker:
             print(f"[DEBUG set_meta_model rank={self.local_rank}] unet_config keys: {sorted(_c.unet_config.keys())}")
             print(f"[DEBUG set_meta_model rank={self.local_rank}] has instance unet_config: {'unet_config' in _c.__dict__}")
 
-            self._fix_model_config(model)
-
             self.state_dict = None
             self.model = model
             self.model.config_fsdp(self.local_rank, self.device_mesh)
