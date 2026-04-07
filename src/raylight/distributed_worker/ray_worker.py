@@ -492,12 +492,6 @@ class RayWorker:
         if self.local_rank == 0:
             disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
 
-        # DEBUG: diagnose out_channels KeyError
-        _m = self.model.model
-        print(f"[DEBUG rank={self.local_rank}] custom_sampler model type: {type(_m).__name__}")
-        print(f"[DEBUG rank={self.local_rank}] custom_sampler out_channels: {_m.model_config.unet_config.get('out_channels', 'MISSING')}")
-        print(f"[DEBUG rank={self.local_rank}] custom_sampler unet_config keys: {sorted(_m.model_config.unet_config.keys())}")
-
         with torch.no_grad():
             samples = comfy.sample.sample_custom(
                 self.model,
@@ -566,15 +560,6 @@ class RayWorker:
         disable_pbar = comfy.utils.PROGRESS_BAR_ENABLED
         if self.local_rank == 0:
             disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
-
-        # DEBUG: diagnose out_channels KeyError
-        _m = self.model.model
-        print(f"[DEBUG rank={self.local_rank}] model type: {type(_m).__name__}")
-        print(f"[DEBUG rank={self.local_rank}] config type: {type(_m.model_config).__name__}")
-        print(f"[DEBUG rank={self.local_rank}] out_channels: {_m.model_config.unet_config.get('out_channels', 'MISSING')}")
-        print(f"[DEBUG rank={self.local_rank}] unet_config keys: {sorted(_m.model_config.unet_config.keys())}")
-        print(f"[DEBUG rank={self.local_rank}] id(model_config): {id(_m.model_config)}")
-        print(f"[DEBUG rank={self.local_rank}] id(model_config.unet_config): {id(_m.model_config.unet_config)}")
 
         with torch.no_grad():
             samples = comfy.sample.sample(
