@@ -368,9 +368,13 @@ class FSDPModelPatcher(comfy.model_patcher.ModelPatcher):
                 elif isinstance(self.model.diffusion_model, FSDPModule):
                     # FSDP-wrapped model: self.model.to(device_to) would call
                     # DTensor.to(device) on each parameter, which materializes
-                    # full tensors per worker (breaking sharding). The backup
-                    # DTensor shards are already on the offload device, so skip.
-                    pass
+                    # full tensors per worker (breaking sharding).
+                    # Instead, break the reference cycle
+                    # (model.current_patcher -> FSDPModelPatcher -> self.model)
+                    # so __del__ runs deterministically on del and frees
+                    # DTensor shard storage via _safe_free_storage.
+                    if hasattr(self.model, "current_patcher"):
+                        self.model.current_patcher = None
                 else:
                     self.model.to(device_to)
                     self.model.device = device_to
@@ -395,6 +399,9 @@ class FSDPModelPatcher(comfy.model_patcher.ModelPatcher):
 
         model = getattr(self, "model", None)
         if model is not None:
+            # Break reference cycle so the inner model can be collected
+            if hasattr(model, "current_patcher"):
+                model.current_patcher = None
             try:
                 has_qt_hint = self._has_quantized_dtensor_shards
                 for m in model.modules():
