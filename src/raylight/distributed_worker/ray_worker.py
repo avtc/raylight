@@ -173,20 +173,25 @@ class RayWorker:
 
     def _reset_active_model(self):
         if self.model is not None:
+            if hasattr(self.model, "free_fsdp_vram"):
+                try:
+                    self.model.free_fsdp_vram()
+                except Exception as e:
+                    print(f"[Rank {self.local_rank}] free_fsdp_vram failed in _reset_active_model: {e}")
             try:
                 self.model.detach()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Rank {self.local_rank}] model.detach() failed in _reset_active_model: {e}")
             try:
                 self.model.cleanup()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Rank {self.local_rank}] model.cleanup() failed in _reset_active_model: {e}")
 
         self.model = None
         self.overwrite_cast_dtype = None
         self.active_request_key = None
-        comfy.model_management.soft_empty_cache()
         gc.collect()
+        comfy.model_management.soft_empty_cache()
 
     def _invalidate_non_fsdp_cache(self):
         self.cached_base_model = None
@@ -245,20 +250,30 @@ class RayWorker:
 
     def load_unet(self, unet_path, model_options):
         if self.parallel_dict["is_fsdp"] is True:
-            if self.cached_base_model is not None or self.active_request_key is not None:
-                self._reset_active_model()
-            self._invalidate_non_fsdp_cache()
+            active_key = self._active_model_key(unet_path, model_options)
+
+            # Fast path: same base model + same LoRA — reuse FSDP-wrapped model
+            if self.model is not None and self.active_request_key == active_key:
+                self.overwrite_cast_dtype = self.model.model.manual_cast_dtype
+                self.is_model_loaded = True
+                return
+
+            # Model or LoRA changed — free old VRAM deterministically, then reload
+            if self.model is not None:
+                try:
+                    self.model.free_fsdp_vram()
+                except Exception as e:
+                    print(f"[Rank {self.local_rank}] free_fsdp_vram failed: {e}")
+
             # Monkey patch
             import comfy.model_patcher as model_patcher
             import comfy.model_management as model_management
 
-            # Monkey patch
             from raylight.comfy_dist.model_management import cleanup_models_gc
             from raylight.comfy_dist.model_patcher import LowVramPatch
 
             from raylight.comfy_dist.sd import fsdp_load_diffusion_model
 
-            # Monkey patch
             model_patcher.LowVramPatch = LowVramPatch
             model_management.cleanup_models_gc = cleanup_models_gc
 
@@ -267,8 +282,8 @@ class RayWorker:
             self.model = None
             self.state_dict = None
             torch.cuda.synchronize()
-            comfy.model_management.soft_empty_cache()
             gc.collect()
+            comfy.model_management.soft_empty_cache()
 
             self.model, self.state_dict = fsdp_load_diffusion_model(
                 unet_path,
@@ -280,6 +295,14 @@ class RayWorker:
             torch.cuda.synchronize()
             comfy.model_management.soft_empty_cache()
             gc.collect()
+
+            if self.lora_list is not None:
+                self.load_lora()
+
+            self.overwrite_cast_dtype = self.model.model.manual_cast_dtype
+            self.is_model_loaded = True
+            self.active_request_key = active_key
+            return
         else:
             base_key = self._base_model_key(unet_path, model_options)
             active_key = self._active_model_key(unet_path, model_options)
@@ -303,12 +326,6 @@ class RayWorker:
             self.cached_base_key = base_key
             self._activate_cached_base_model(active_key)
             return
-
-        if self.lora_list is not None:
-            self.load_lora()
-
-        self.overwrite_cast_dtype = self.model.model.manual_cast_dtype
-        self.is_model_loaded = True
 
     def load_gguf_unet(self, unet_path, dequant_dtype, patch_dtype):
         self._reset_active_model()
@@ -344,6 +361,10 @@ class RayWorker:
 
             m = getattr(self.model, "model", None)
             if m is not None and isinstance(getattr(m, "diffusion_model", None), FSDPModule):
+                try:
+                    self.model.free_fsdp_vram()
+                except Exception as e:
+                    print(f"[Rank {self.local_rank}] free_fsdp_vram failed (bnb): {e}")
                 del self.model
                 self.model = None
             self.model, self.state_dict = fsdp_bnb_load_diffusion_model(
