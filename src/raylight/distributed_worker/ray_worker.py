@@ -458,11 +458,13 @@ class RayWorker:
         else:
             from raylight.comfy_dist.sd import gguf_load_diffusion_model
 
-            self.model = gguf_load_diffusion_model(
+            if self.model is not None:
                 try:
                     self.model.free_fsdp_vram()
                 except Exception as e:
                     print(f"[Rank {self.local_rank}] free_fsdp_vram failed (bnb): {e}")
+
+            self.model = gguf_load_diffusion_model(
                 unet_path,
                 model_options={"use_mmap": use_mmap},
                 dequant_dtype=dequant_dtype,
