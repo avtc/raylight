@@ -155,7 +155,7 @@ class RayInitializer:
                     [member.name for member in AttnType],
                     {"default": "TORCH_FLASH", "tooltip": "Attention backend to use in inference"},
                 ),
-                "FSDP_group_size": ("INT", {"default": 1, "min": 1, "tooltip": "Number of GPUs per FSDP group. 1 = pure DP (current behavior). 2 = pairs. Must divide GPU count evenly."}),
+                "FSDP_model_replicas": ("INT", {"default": 1, "min": 1, "tooltip": "Number of independent model replicas. 1 = one model sharded across all GPUs (default). Must divide GPU count evenly. Only applies when FSDP is enabled."}),
             }
         }
 
@@ -170,7 +170,7 @@ class RayInitializer:
         ray_cluster_address: str,
         ray_cluster_namespace: str,
         GPU: int,
-        FSDP_group_size: int,
+        FSDP_model_replicas: int,
         ulysses_degree: int,
         ring_degree: int,
         cfg_degree: int,
@@ -213,21 +213,21 @@ class RayInitializer:
             raise ValueError(f"ERROR, num_gpus: {world_size}, is lower than {ulysses_degree=} x {ring_degree=} x {cfg_degree=}")
         if cfg_degree > 2:
             raise ValueError("CFG batch only can be divided into 2 degree of parallelism, since its dimension is only 2")
-        if FSDP_group_size > 1 and not FSDP:
-            raise ValueError("FSDP_group_size > 1 requires FSDP to be enabled. FSDP shards the model within each group.")
-        if GPU % FSDP_group_size != 0:
-            raise ValueError(f"GPU count ({GPU}) must be evenly divisible by FSDP_group_size ({FSDP_group_size})")
-        num_groups = GPU // FSDP_group_size
+        if FSDP_model_replicas > 1 and not FSDP:
+            raise ValueError("FSDP_model_replicas > 1 requires FSDP to be enabled. FSDP shards the model within each replica.")
+        if GPU % FSDP_model_replicas != 0:
+            raise ValueError(f"GPU count ({GPU}) must be evenly divisible by FSDP_model_replicas ({FSDP_model_replicas})")
+        shard_size = GPU // FSDP_model_replicas
 
         self.parallel_dict["is_xdit"] = False
         self.parallel_dict["is_fsdp"] = False
         self.parallel_dict["sync_ulysses"] = False
         self.parallel_dict["global_world_size"] = world_size
-        self.parallel_dict["FSDP_group_size"] = FSDP_group_size
-        self.parallel_dict["num_groups"] = num_groups
+        self.parallel_dict["FSDP_model_replicas"] = FSDP_model_replicas
+        self.parallel_dict["shard_size"] = shard_size
 
-        if FSDP_group_size > 1:
-            self.parallel_dict["global_world_size"] = FSDP_group_size
+        if FSDP:
+            self.parallel_dict["global_world_size"] = shard_size
 
         if ulysses_degree > 0 or ring_degree > 0 or cfg_degree > 0:
             if ulysses_degree * ring_degree * cfg_degree == 0:
@@ -320,7 +320,7 @@ class RayInitializerAdvanced(RayInitializer):
                     [member.name for member in AttnType],
                     {"default": "TORCH_FLASH", "tooltip": "Attention backend to use in inference"},
                 ),
-                "FSDP_group_size": ("INT", {"default": 1, "min": 1, "tooltip": "Number of GPUs per FSDP group. 1 = pure DP. 2 = pairs."}),
+                "FSDP_model_replicas": ("INT", {"default": 1, "min": 1, "tooltip": "Number of independent model replicas. 1 = one model sharded across all GPUs (default). Must divide GPU count evenly. Only applies when FSDP is enabled."}),
             }
         }
 
@@ -393,10 +393,10 @@ class RayUNETLoader:
         loaded_futures = []
 
         if parallel_dict["is_fsdp"] is True:
-            group_size = parallel_dict.get("FSDP_group_size", 1)
-            num_groups = parallel_dict.get("num_groups", len(gpu_actors))
+            num_replicas = parallel_dict.get("FSDP_model_replicas", 1)
+            shard_size = parallel_dict.get("shard_size", len(gpu_actors))
 
-            if group_size <= 1:
+            if num_replicas <= 1:
                 # Original flat FSDP — backward compatible
                 if parallel_dict["is_quant"] is False:
                     worker0 = ray.get_actor("RayWorker:0")
@@ -424,9 +424,9 @@ class RayUNETLoader:
                         loaded_futures.append(actor.set_state_dict.remote())
 
             else:
-                # Grouped FSDP — load model per group
-                for group_id in range(num_groups):
-                    group_actors = gpu_actors[group_id * group_size : (group_id + 1) * group_size]
+                # Multiple replicas — load model per group
+                for group_id in range(num_replicas):
+                    group_actors = gpu_actors[group_id * shard_size : (group_id + 1) * shard_size]
 
                     if parallel_dict["is_quant"] is False:
                         rank0_name = f"RayWorker:{group_id}_0"
@@ -699,108 +699,54 @@ class DPKSamplerAdvanced:
             """
             )
 
-        group_size = parallel_dict.get("FSDP_group_size", 1)
-        num_groups = parallel_dict.get("num_groups", len(gpu_actors))
+        # Auto-replicate: if fewer items than GPUs, fill remaining
+        num_gpus = len(gpu_actors)
+        if len(latent_image) != num_gpus:
+            latent_image = [latent_image[0]] * num_gpus
+        if len(positive) == 1:
+            positive = positive * num_gpus
+        if len(negative) == 1:
+            negative = negative * num_gpus
+        if len(noise_list) != num_gpus:
+            if len(noise_list) >= num_gpus:
+                noise_list = noise_list[:num_gpus]
+            else:
+                noise_list = [noise_list[0]] * num_gpus
 
-        if group_size <= 1:
-            # Original flat DP mode — backward compatible
-            if len(latent_image) != len(gpu_actors):
-                latent_image = [latent_image[0]] * len(gpu_actors)
-            if len(positive) == 1:
-                positive = positive * len(gpu_actors)
-            if len(negative) == 1:
-                negative = negative * len(gpu_actors)
+        # Clean VRAM for preparation to load model
+        gc.collect()
+        comfy.model_management.unload_all_models()
+        comfy.model_management.soft_empty_cache()
+        force_full_denoise = True
+        if return_with_leftover_noise == "enable":
+            force_full_denoise = False
+        disable_noise = False
+        if add_noise == "disable":
+            disable_noise = True
 
-            # Clean VRAM for preparation to load model
-            gc.collect()
-            comfy.model_management.unload_all_models()
-            comfy.model_management.soft_empty_cache()
-            force_full_denoise = True
-            if return_with_leftover_noise == "enable":
-                force_full_denoise = False
-            disable_noise = False
-            if add_noise == "disable":
-                disable_noise = True
+        # Each GPU gets its own noise/conditioning — decoupled from FSDP sharding
+        futures = [
+            actor.common_ksampler.remote(
+                noise_list[i],
+                steps,
+                cfg,
+                sampler_name,
+                scheduler,
+                positive[i],
+                negative[i],
+                latent_image[i],
+                denoise=denoise,
+                disable_noise=disable_noise,
+                start_step=start_at_step,
+                last_step=end_at_step,
+                force_full_denoise=force_full_denoise,
+            )
+            for i, actor in enumerate(gpu_actors)
+        ]
 
-            futures = [
-                actor.common_ksampler.remote(
-                    noise_list[i],
-                    steps,
-                    cfg,
-                    sampler_name,
-                    scheduler,
-                    positive[i],
-                    negative[i],
-                    latent_image[i],
-                    denoise=denoise,
-                    disable_noise=disable_noise,
-                    start_step=start_at_step,
-                    last_step=end_at_step,
-                    force_full_denoise=force_full_denoise,
-                )
-                for i, actor in enumerate(gpu_actors)
-            ]
-
-            results = ray.get(futures)
-            results = [result[0] for result in results]
-            return (results,)
-        else:
-            # Grouped DP+FSDP mode
-            # Auto-replicate: if fewer items than groups, fill remaining
-            if len(latent_image) != num_groups:
-                latent_image = [latent_image[0]] * num_groups
-            if len(positive) == 1:
-                positive = positive * num_groups
-            if len(negative) == 1:
-                negative = negative * num_groups
-            if len(noise_list) != num_groups:
-                if len(noise_list) >= num_groups:
-                    noise_list = noise_list[:num_groups]
-                else:
-                    noise_list = [noise_list[0]] * num_groups
-
-            # Clean VRAM for preparation to load model
-            gc.collect()
-            comfy.model_management.unload_all_models()
-            comfy.model_management.soft_empty_cache()
-            force_full_denoise = True
-            if return_with_leftover_noise == "enable":
-                force_full_denoise = False
-            disable_noise = False
-            if add_noise == "disable":
-                disable_noise = True
-
-            # Dispatch to ALL workers, mapping group inputs
-            futures = []
-            for i, actor in enumerate(gpu_actors):
-                group_id = i // group_size
-                futures.append(
-                    actor.common_ksampler.remote(
-                        noise_list[group_id],
-                        steps,
-                        cfg,
-                        sampler_name,
-                        scheduler,
-                        positive[group_id],
-                        negative[group_id],
-                        latent_image[group_id],
-                        denoise=denoise,
-                        disable_noise=disable_noise,
-                        start_step=start_at_step,
-                        last_step=end_at_step,
-                        force_full_denoise=force_full_denoise,
-                    )
-                )
-
-            results = ray.get(futures)
-
-            # Collect only rank 0 results from each group
-            group_results = []
-            for group_id in range(num_groups):
-                rank0_index = group_id * group_size
-                group_results.append(results[rank0_index][0])
-
-            return (group_results,)
+        results = ray.get(futures)
+        results = [result[0] for result in results]
+        return (results,)
 
 
 class Noise_RandomNoise:

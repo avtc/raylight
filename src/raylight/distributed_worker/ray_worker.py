@@ -57,7 +57,6 @@ class RayWorker:
 
         self.local_rank = local_rank
         self.global_world_size = self.parallel_dict["global_world_size"]
-        self.group_size = self.parallel_dict.get("FSDP_group_size", 1)
         self.group_id = self.parallel_dict.get("group_id", 0)
 
         self.device_id = device_id
@@ -73,13 +72,10 @@ class RayWorker:
         os.environ["NCCL_DEBUG"] = "WARN"
         os.environ["CUDA_VISIBLE_DEVICES"] = str(self.device_id)
 
-        # Determine effective world_size for NCCL
-        if self.group_size > 1:
-            nccl_world_size = self.group_size
-            nccl_rank = local_rank
-        else:
-            nccl_world_size = self.global_world_size
-            nccl_rank = local_rank
+        # global_world_size is already set to shard_size (GPUs per replica) by spawn_actor
+        # when FSDP is enabled, or total GPU count when FSDP is disabled.
+        nccl_world_size = self.global_world_size
+        nccl_rank = local_rank
 
         # Each group gets its own port for NCCL isolation
         base_port = int(os.environ.get("MASTER_PORT", "29500"))
@@ -93,7 +89,6 @@ class RayWorker:
             init_method=f"tcp://127.0.0.1:{group_port}",
         )
 
-        # (TODO-Komikndr) Should be modified so it can do support DP on top of FSDP
         if self.parallel_dict["is_xdit"] or self.parallel_dict["is_fsdp"]:
             self.device_mesh = dist.device_mesh.init_device_mesh("cuda", mesh_shape=(nccl_world_size,))
         else:
@@ -668,16 +663,16 @@ def ray_nccl_tester(world_size):
 
 
 def make_ray_actor_fn(world_size, parallel_dict):
-    group_size = parallel_dict.get("FSDP_group_size", 1)
-    num_groups = parallel_dict.get("num_groups", world_size)
+    num_replicas = parallel_dict.get("FSDP_model_replicas", 1)
+    shard_size = parallel_dict.get("shard_size", world_size)
 
     def _init_ray_actor(world_size=world_size, parallel_dict=parallel_dict):
         ray_actors = dict()
         gpu_actor = ray.remote(RayWorker)
         gpu_actors = []
 
-        if group_size <= 1:
-            # Original flat DP mode — backward compatible
+        if num_replicas <= 1:
+            # Single replica — all GPUs in one group
             for local_rank in range(world_size):
                 gpu_actors.append(
                     gpu_actor.options(num_gpus=1, name=f"RayWorker:{local_rank}").remote(
@@ -687,13 +682,12 @@ def make_ray_actor_fn(world_size, parallel_dict):
                     )
                 )
         else:
-            # Grouped DP+FSDP mode
-            for group_id in range(num_groups):
-                # Each group gets its own parallel_dict copy with group_id
+            # Multiple replicas — each replica gets its own NCCL group
+            for group_id in range(num_replicas):
                 group_parallel_dict = dict(parallel_dict)
                 group_parallel_dict["group_id"] = group_id
 
-                for local_rank in range(group_size):
+                for local_rank in range(shard_size):
                     gpu_actors.append(
                         gpu_actor.options(
                             num_gpus=1,

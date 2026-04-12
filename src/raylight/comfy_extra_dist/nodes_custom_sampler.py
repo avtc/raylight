@@ -340,68 +340,35 @@ class DPSamplerCustom:
         comfy.model_management.soft_empty_cache()
         gpu_actors = ray_actors["workers"]
         parallel_dict = ray.get(gpu_actors[0].get_parallel_dict.remote())
-        group_size = parallel_dict.get("FSDP_group_size", 1)
-        num_groups = parallel_dict.get("num_groups", len(gpu_actors))
+        num_gpus = len(gpu_actors)
 
-        if group_size <= 1:
-            # Original flat DP mode — backward compatible
-            if len(positive) == 1:
-                positive = positive * len(gpu_actors)
-            if len(negative) == 1:
-                negative = negative * len(gpu_actors)
+        # Auto-replicate: if fewer items than GPUs, fill remaining
+        if len(positive) == 1:
+            positive = positive * num_gpus
+        if len(negative) == 1:
+            negative = negative * num_gpus
+        if len(noise_list) != num_gpus:
+            if len(noise_list) >= num_gpus:
+                noise_list = noise_list[:num_gpus]
+            else:
+                noise_list = [noise_list[0]] * num_gpus
 
-            futures = [
-                actor.custom_sampler.remote(
-                    add_noise,
-                    noise_list[i],
-                    cfg,
-                    positive[i],
-                    negative[i],
-                    sampler,
-                    sigmas,
-                    latent_image,
-                )
-                for i, actor in enumerate(gpu_actors)
-            ]
-            out = ray.get(futures)
-            return (out,)
-        else:
-            # Grouped DP+FSDP mode
-            if len(positive) == 1:
-                positive = positive * num_groups
-            if len(negative) == 1:
-                negative = negative * num_groups
-            if len(noise_list) != num_groups:
-                if len(noise_list) >= num_groups:
-                    noise_list = noise_list[:num_groups]
-                else:
-                    noise_list = [noise_list[0]] * num_groups
-
-            futures = []
-            for i, actor in enumerate(gpu_actors):
-                group_id = i // group_size
-                futures.append(
-                    actor.custom_sampler.remote(
-                        add_noise,
-                        noise_list[group_id],
-                        cfg,
-                        positive[group_id],
-                        negative[group_id],
-                        sampler,
-                        sigmas,
-                        latent_image,
-                    )
-                )
-
-            results = ray.get(futures)
-
-            # Collect only rank 0 results from each group
-            group_results = []
-            for group_id in range(num_groups):
-                rank0_index = group_id * group_size
-                group_results.append(results[rank0_index])
-
-            return (group_results,)
+        # Each GPU gets its own noise/conditioning — decoupled from FSDP sharding
+        futures = [
+            actor.custom_sampler.remote(
+                add_noise,
+                noise_list[i],
+                cfg,
+                positive[i],
+                negative[i],
+                sampler,
+                sigmas,
+                latent_image,
+            )
+            for i, actor in enumerate(gpu_actors)
+        ]
+        out = ray.get(futures)
+        return (out,)
 
 
 class RayAddNoise:
