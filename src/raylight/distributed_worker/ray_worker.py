@@ -200,7 +200,7 @@ class RayWorker:
         self.overwrite_cast_dtype = None
         self.active_request_key = None
         gc.collect()
-        comfy.model_management.soft_empty_cache()
+        comfy_model_management.soft_empty_cache()
 
     def _invalidate_non_fsdp_cache(self):
         self.cached_base_model = None
@@ -367,7 +367,7 @@ class RayWorker:
             self.state_dict = None
             torch.cuda.synchronize()
             gc.collect()
-            comfy.model_management.soft_empty_cache()
+            model_management.soft_empty_cache()
 
             self.model, self.state_dict = fsdp_load_diffusion_model(
                 unet_path,
@@ -377,7 +377,7 @@ class RayWorker:
                 model_options=fsdp_model_options,
             )
             torch.cuda.synchronize()
-            comfy_model_management.soft_empty_cache()
+            model_management.soft_empty_cache()
             gc.collect()
 
             if self.lora_list is not None:
