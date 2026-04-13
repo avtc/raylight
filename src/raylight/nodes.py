@@ -292,10 +292,16 @@ class RayInitializer:
                     },
                 ),
             },
+            "optional": {
+                "prev_ray_actors_chain": (
+                    "RAY_ACTORS_CHAIN",
+                    {"default": None, "tooltip": "Chain from previous Ray Init Actor. Leave unconnected for the first actor in the chain."},
+                ),
+            },
         }
 
-    RETURN_TYPES = ("RAY_ACTORS_INIT",)
-    RETURN_NAMES = ("ray_actors_init",)
+    RETURN_TYPES = ("RAY_ACTORS_INIT", "RAY_ACTORS_CHAIN")
+    RETURN_NAMES = ("ray_actors_init", "ray_actors_chain")
 
     FUNCTION = "spawn_actor"
     CATEGORY = "Raylight"
@@ -319,6 +325,7 @@ class RayInitializer:
         ray_object_store_gb: float = 2.0,
         ray_dashboard_address: str = "None",
         torch_dist_address: str = "None",
+        prev_ray_actors_chain=None,
     ):
         # THIS IS PYTORCH DIST ADDRESS
         # (TODO) Change so it can be use in cluster of nodes. but it is long waaaaay down in the priority list
@@ -339,16 +346,36 @@ class RayInitializer:
 
         world_size = GPU
         selected_gpus = _parse_gpu_select(GPU_SELECT)
-        if selected_gpus is None:
-            max_world_size = torch.cuda.device_count()
+
+        if prev_ray_actors_chain is None:
+            # ROOT initializer: manage the Ray pool
+            existing_workers = []
+            group_id = 0
+
+            if selected_gpus is None:
+                max_world_size = torch.cuda.device_count()
+            else:
+                visible_gpu_count = torch.cuda.device_count()
+                invalid = [gpu_idx for gpu_idx in selected_gpus if gpu_idx >= visible_gpu_count]
+                if invalid:
+                    raise ValueError(f"GPU_SELECT contains GPU index outside visible range 0-{visible_gpu_count - 1}: {invalid}")
+                max_world_size = len(selected_gpus)
+            if world_size > max_world_size:
+                raise ValueError(f"Too many gpus: requested {world_size} but only {max_world_size} selected/visible")
         else:
-            visible_gpu_count = torch.cuda.device_count()
-            invalid = [gpu_idx for gpu_idx in selected_gpus if gpu_idx >= visible_gpu_count]
-            if invalid:
-                raise ValueError(f"GPU_SELECT contains GPU index outside visible range 0-{visible_gpu_count - 1}: {invalid}")
-            max_world_size = len(selected_gpus)
-        if world_size > max_world_size:
-            raise ValueError(f"Too many gpus: requested {world_size} but only {max_world_size} selected/visible")
+            # CHAINED initializer: add to existing pool
+            chain_actors, _ = prev_ray_actors_chain
+            existing_workers = chain_actors["workers"]
+            # Determine next group_id by querying existing actors
+            group_ids = set()
+            for w in existing_workers:
+                try:
+                    gid = ray.get(w.get_group_id.remote())
+                    group_ids.add(gid)
+                except Exception:
+                    pass
+            group_id = max(group_ids, default=-1) + 1
+
         if world_size == 0:
             raise ValueError("Num of cuda/cudalike device is 0")
         if world_size < ulysses_degree * ring_degree * cfg_degree:
@@ -369,6 +396,7 @@ class RayInitializer:
         self.parallel_dict["shard_size"] = shard_size
         self.parallel_dict["use_mmap"] = use_mmap
         self.parallel_dict["pp_degree"] = 1
+        self.parallel_dict["group_id"] = group_id
         _reset_pipefusion_runtime_config(self.parallel_dict)
 
         if ulysses_degree > 0 or ring_degree > 0 or cfg_degree > 0:
@@ -388,68 +416,84 @@ class RayInitializer:
             self.parallel_dict["is_fsdp"] = True
             self.parallel_dict["global_world_size"] = shard_size
 
-        if ray_dashboard_address != "None":
-            dashboard_host, dashboard_port = ray_dashboard_address.rsplit(":", 1)
-            dashboard_port = int(dashboard_port)
-            enable_dashboard = True
-        else:
-            dashboard_host, dashboard_port = "127.0.0.1", None
-            enable_dashboard = False
+        if prev_ray_actors_chain is None:
+            # ROOT: initialize Ray cluster
+            if ray_dashboard_address != "None":
+                dashboard_host, dashboard_port = ray_dashboard_address.rsplit(":", 1)
+                dashboard_port = int(dashboard_port)
+                enable_dashboard = True
+            else:
+                dashboard_host, dashboard_port = "127.0.0.1", None
+                enable_dashboard = False
 
-        ray_object_store_gb = int(ray_object_store_gb * 1024**3)
-        runtime_env_base = deepcopy(_RAY_RUNTIME_ENV_LOCAL)
-        if ray_cluster_address not in _LOCAL_CLUSTER_ADDRESSES:
-            runtime_env_base = deepcopy(_RAY_RUNTIME_ENV_REMOTE)
+            ray_object_store_gb = int(ray_object_store_gb * 1024**3)
+            runtime_env_base = deepcopy(_RAY_RUNTIME_ENV_LOCAL)
+            if ray_cluster_address not in _LOCAL_CLUSTER_ADDRESSES:
+                runtime_env_base = deepcopy(_RAY_RUNTIME_ENV_REMOTE)
 
-        if selected_gpus is not None:
-            # Adapted from avtc's Ray GPU visibility restriction idea.
-            runtime_env_base.setdefault("env_vars", {})["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_idx) for gpu_idx in selected_gpus)
+            if selected_gpus is not None:
+                # Adapted from avtc's Ray GPU visibility restriction idea.
+                runtime_env_base.setdefault("env_vars", {})["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_idx) for gpu_idx in selected_gpus)
 
-        try:
-            # Shut down so if comfy user try another workflow it will not cause error
-            ray.shutdown()
-            original_cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
-            restricted_cuda_visible_devices = runtime_env_base.get("env_vars", {}).get("CUDA_VISIBLE_DEVICES")
-            if restricted_cuda_visible_devices is not None:
-                os.environ["CUDA_VISIBLE_DEVICES"] = restricted_cuda_visible_devices
             try:
-                ray.init(
-                    ray_cluster_address,
-                    namespace=ray_cluster_namespace,
-                    runtime_env=deepcopy(runtime_env_base),
-                    object_store_memory=ray_object_store_gb,
-                    include_dashboard=enable_dashboard,
-                    dashboard_host=dashboard_host,
-                    dashboard_port=dashboard_port,
-                )
-            finally:
+                # Shut down so if comfy user try another workflow it will not cause error
+                ray.shutdown()
+                original_cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+                restricted_cuda_visible_devices = runtime_env_base.get("env_vars", {}).get("CUDA_VISIBLE_DEVICES")
                 if restricted_cuda_visible_devices is not None:
-                    if original_cuda_visible_devices is not None:
-                        os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible_devices
-                    else:
-                        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-        except Exception as e:
-            ray.shutdown()
-            if restricted_cuda_visible_devices is not None:
-                os.environ["CUDA_VISIBLE_DEVICES"] = restricted_cuda_visible_devices
-            try:
-                ray.init(runtime_env=deepcopy(runtime_env_base))
-            finally:
+                    os.environ["CUDA_VISIBLE_DEVICES"] = restricted_cuda_visible_devices
+                try:
+                    ray.init(
+                        ray_cluster_address,
+                        namespace=ray_cluster_namespace,
+                        runtime_env=deepcopy(runtime_env_base),
+                        object_store_memory=ray_object_store_gb,
+                        include_dashboard=enable_dashboard,
+                        dashboard_host=dashboard_host,
+                        dashboard_port=dashboard_port,
+                    )
+                finally:
+                    if restricted_cuda_visible_devices is not None:
+                        if original_cuda_visible_devices is not None:
+                            os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible_devices
+                        else:
+                            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+            except Exception as e:
+                ray.shutdown()
                 if restricted_cuda_visible_devices is not None:
-                    if original_cuda_visible_devices is not None:
-                        os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible_devices
-                    else:
-                        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-            raise RuntimeError(f"Ray connection failed: {e}")
+                    os.environ["CUDA_VISIBLE_DEVICES"] = restricted_cuda_visible_devices
+                try:
+                    ray.init(runtime_env=deepcopy(runtime_env_base))
+                finally:
+                    if restricted_cuda_visible_devices is not None:
+                        if original_cuda_visible_devices is not None:
+                            os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible_devices
+                        else:
+                            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+                raise RuntimeError(f"Ray connection failed: {e}")
 
-        if not skip_comm_test:
-            print("Running NCCL communication test...")
-            ray_nccl_tester(world_size)
+            if not skip_comm_test:
+                print("Running NCCL communication test...")
+                ray_nccl_tester(world_size)
+            else:
+                print("Skipping NCCL test (skip_comm_test=True)")
         else:
-            print("Skipping NCCL test (skip_comm_test=True)")
+            # CHAINED: Ray already initialized, skip NCCL test
+            print(f"Chaining RayInitActor as group {group_id} (Ray already initialized)")
+
+        # Create actors for this group
         ray_actor_fn = make_ray_actor_fn(world_size, self.parallel_dict)
-        ray_actors = ray_actor_fn()
-        return ([ray_actors, ray_actor_fn],)
+        new_ray_actors = ray_actor_fn()
+        new_workers = new_ray_actors["workers"]
+
+        # Output 1: only this group's actors (→ LoadModel)
+        group_output = [{"workers": new_workers}, ray_actor_fn]
+
+        # Output 2: merged pool (→ next RayInitActor)
+        all_workers = existing_workers + new_workers
+        chain_output = [{"workers": all_workers}, ray_actor_fn]
+
+        return (group_output, chain_output)
 
 
 class RayInitializerAdvanced(RayInitializer):
@@ -549,11 +593,15 @@ class RayInitializerAdvanced(RayInitializer):
                         "tooltip": "Torch distributed master address used by worker-side NCCL init. Restart ComfyUI if you change it.",
                     },
                 ),
+                "prev_ray_actors_chain": (
+                    "RAY_ACTORS_CHAIN",
+                    {"default": None, "tooltip": "Chain from previous Ray Init Actor. Leave unconnected for the first actor in the chain."},
+                ),
             },
         }
 
-    RETURN_TYPES = ("RAY_ACTORS_INIT",)
-    RETURN_NAMES = ("ray_actors_init",)
+    RETURN_TYPES = ("RAY_ACTORS_INIT", "RAY_ACTORS_CHAIN")
+    RETURN_NAMES = ("ray_actors_init", "ray_actors_chain")
 
     FUNCTION = "spawn_actor"
     CATEGORY = "Raylight"
