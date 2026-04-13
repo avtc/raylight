@@ -637,6 +637,7 @@ class RayWorker:
             out = latent.copy()
             out["samples"] = samples
 
+        self.model.detach()
         comfy_model_management.soft_empty_cache()
         gc.collect()
         return out
@@ -712,6 +713,7 @@ class RayWorker:
             out = latent.copy()
             out["samples"] = samples
 
+        self.model.detach()
         comfy_model_management.soft_empty_cache()
         gc.collect()
         return (out,)
