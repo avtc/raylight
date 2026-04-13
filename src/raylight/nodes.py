@@ -291,6 +291,13 @@ class RayInitializer:
                         "tooltip": "Number of independent model replicas. 1 = one model sharded across all GPUs (default). Must divide GPU count evenly. Only applies when FSDP is enabled.",
                     },
                 ),
+                "keep_model_loaded": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Keep model in VRAM after sampling. Enable to reuse the model across runs without reloading. Disable to free VRAM after each run.",
+                    },
+                ),
             },
             "optional": {
                 "prev_ray_actors_chain": (
@@ -321,6 +328,7 @@ class RayInitializer:
         skip_comm_test: bool = True,
         use_mmap: bool = True,
         FSDP_model_replicas: int = 1,
+        keep_model_loaded: bool = False,
         GPU_SELECT: str = "",
         ray_object_store_gb: float = 2.0,
         ray_dashboard_address: str = "None",
@@ -395,6 +403,7 @@ class RayInitializer:
         self.parallel_dict["FSDP_model_replicas"] = FSDP_model_replicas
         self.parallel_dict["shard_size"] = shard_size
         self.parallel_dict["use_mmap"] = use_mmap
+        self.parallel_dict["keep_model_loaded"] = keep_model_loaded
         self.parallel_dict["pp_degree"] = 1
         self.parallel_dict["group_id"] = group_id
         _reset_pipefusion_runtime_config(self.parallel_dict)
@@ -580,6 +589,13 @@ class RayInitializerAdvanced(RayInitializer):
                         "default": 1,
                         "min": 1,
                         "tooltip": "Number of independent model replicas. 1 = one model sharded across all GPUs (default). Must divide GPU count evenly. Only applies when FSDP is enabled.",
+                    },
+                ),
+                "keep_model_loaded": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Keep model in VRAM after sampling. Enable to reuse the model across runs without reloading. Disable to free VRAM after each run.",
                     },
                 ),
             },

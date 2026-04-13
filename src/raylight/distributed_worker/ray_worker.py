@@ -637,7 +637,8 @@ class RayWorker:
             out = latent.copy()
             out["samples"] = samples
 
-        self.model.detach()
+        if not self.parallel_dict.get("keep_model_loaded", False):
+            self.model.detach()
         comfy_model_management.soft_empty_cache()
         gc.collect()
         return out
@@ -713,7 +714,8 @@ class RayWorker:
             out = latent.copy()
             out["samples"] = samples
 
-        self.model.detach()
+        if not self.parallel_dict.get("keep_model_loaded", False):
+            self.model.detach()
         comfy_model_management.soft_empty_cache()
         gc.collect()
         return (out,)
