@@ -431,24 +431,46 @@ class RayInitializer:
             if ray_cluster_address not in _LOCAL_CLUSTER_ADDRESSES:
                 runtime_env_base = deepcopy(_RAY_RUNTIME_ENV_REMOTE)
 
+            if selected_gpus is not None:
+                runtime_env_base.setdefault("env_vars", {})["CUDA_VISIBLE_DEVICES"] = ",".join(
+                    str(gpu_idx) for gpu_idx in selected_gpus
+                )
+
             try:
                 # Shut down so if comfy user try another workflow it will not cause error
                 ray.shutdown()
-                ray.init(
-                    ray_cluster_address,
-                    namespace=ray_cluster_namespace,
-                    runtime_env=deepcopy(runtime_env_base),
-                    object_store_memory=ray_object_store_gb,
-                    include_dashboard=enable_dashboard,
-                    dashboard_host=dashboard_host,
-                    dashboard_port=dashboard_port,
-                )
+                original_cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+                restricted_cuda_visible_devices = runtime_env_base.get("env_vars", {}).get("CUDA_VISIBLE_DEVICES")
+                if restricted_cuda_visible_devices is not None:
+                    os.environ["CUDA_VISIBLE_DEVICES"] = restricted_cuda_visible_devices
+                try:
+                    ray.init(
+                        ray_cluster_address,
+                        namespace=ray_cluster_namespace,
+                        runtime_env=deepcopy(runtime_env_base),
+                        object_store_memory=ray_object_store_gb,
+                        include_dashboard=enable_dashboard,
+                        dashboard_host=dashboard_host,
+                        dashboard_port=dashboard_port,
+                    )
+                finally:
+                    if restricted_cuda_visible_devices is not None:
+                        if original_cuda_visible_devices is not None:
+                            os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible_devices
+                        else:
+                            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
             except Exception as e:
                 ray.shutdown()
+                if restricted_cuda_visible_devices is not None:
+                    os.environ["CUDA_VISIBLE_DEVICES"] = restricted_cuda_visible_devices
                 try:
                     ray.init(runtime_env=deepcopy(runtime_env_base))
-                except Exception:
-                    pass
+                finally:
+                    if restricted_cuda_visible_devices is not None:
+                        if original_cuda_visible_devices is not None:
+                            os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible_devices
+                        else:
+                            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
                 raise RuntimeError(f"Ray connection failed: {e}")
 
             if not skip_comm_test:
