@@ -88,7 +88,6 @@ class RayWorker:
 
         os.environ["XDIT_LOGGING_LEVEL"] = "WARN"
         os.environ["NCCL_DEBUG"] = "WARN"
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(self.device_id)
 
         # global_world_size is already set to shard_size (GPUs per replica) by spawn_actor
         # when FSDP is enabled, or total GPU count when FSDP is disabled.
@@ -638,10 +637,6 @@ class RayWorker:
             out = latent.copy()
             out["samples"] = samples
 
-        if ray.get_runtime_context().get_accelerator_ids()["GPU"][0] and self.parallel_dict["is_fsdp"] == "0":
-            self.model.detach()
-        else:
-            self.model.detach()
         comfy_model_management.soft_empty_cache()
         gc.collect()
         return out
@@ -717,12 +712,6 @@ class RayWorker:
             out = latent.copy()
             out["samples"] = samples
 
-        if ray.get_runtime_context().get_accelerator_ids()["GPU"][0] and self.parallel_dict["is_fsdp"] == "0":
-            self.model.detach()
-
-        # I haven't implemented for non FSDP detached, so all rank model will be move into RAM
-        else:
-            self.model.detach()
         comfy_model_management.soft_empty_cache()
         gc.collect()
         return (out,)
@@ -731,7 +720,6 @@ class RayWorker:
 class RayCOMMTester:
     def __init__(self, local_rank, world_size, device_id):
         device = torch.device(f"cuda:{device_id}")
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(device_id)
 
         dist.init_process_group(
             "nccl",

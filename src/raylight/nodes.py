@@ -431,45 +431,24 @@ class RayInitializer:
             if ray_cluster_address not in _LOCAL_CLUSTER_ADDRESSES:
                 runtime_env_base = deepcopy(_RAY_RUNTIME_ENV_REMOTE)
 
-            if selected_gpus is not None:
-                # Adapted from avtc's Ray GPU visibility restriction idea.
-                runtime_env_base.setdefault("env_vars", {})["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_idx) for gpu_idx in selected_gpus)
-
             try:
                 # Shut down so if comfy user try another workflow it will not cause error
                 ray.shutdown()
-                original_cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
-                restricted_cuda_visible_devices = runtime_env_base.get("env_vars", {}).get("CUDA_VISIBLE_DEVICES")
-                if restricted_cuda_visible_devices is not None:
-                    os.environ["CUDA_VISIBLE_DEVICES"] = restricted_cuda_visible_devices
-                try:
-                    ray.init(
-                        ray_cluster_address,
-                        namespace=ray_cluster_namespace,
-                        runtime_env=deepcopy(runtime_env_base),
-                        object_store_memory=ray_object_store_gb,
-                        include_dashboard=enable_dashboard,
-                        dashboard_host=dashboard_host,
-                        dashboard_port=dashboard_port,
-                    )
-                finally:
-                    if restricted_cuda_visible_devices is not None:
-                        if original_cuda_visible_devices is not None:
-                            os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible_devices
-                        else:
-                            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+                ray.init(
+                    ray_cluster_address,
+                    namespace=ray_cluster_namespace,
+                    runtime_env=deepcopy(runtime_env_base),
+                    object_store_memory=ray_object_store_gb,
+                    include_dashboard=enable_dashboard,
+                    dashboard_host=dashboard_host,
+                    dashboard_port=dashboard_port,
+                )
             except Exception as e:
                 ray.shutdown()
-                if restricted_cuda_visible_devices is not None:
-                    os.environ["CUDA_VISIBLE_DEVICES"] = restricted_cuda_visible_devices
                 try:
                     ray.init(runtime_env=deepcopy(runtime_env_base))
-                finally:
-                    if restricted_cuda_visible_devices is not None:
-                        if original_cuda_visible_devices is not None:
-                            os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible_devices
-                        else:
-                            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+                except Exception:
+                    pass
                 raise RuntimeError(f"Ray connection failed: {e}")
 
             if not skip_comm_test:
@@ -478,8 +457,16 @@ class RayInitializer:
             else:
                 print("Skipping NCCL test (skip_comm_test=True)")
         else:
-            # CHAINED: Ray already initialized, skip NCCL test
-            print(f"Chaining RayInitActor as group {group_id} (Ray already initialized)")
+            # CHAINED: Ray already initialized
+            available_gpus = ray.available_resources().get("GPU", 0)
+            total_gpus = ray.cluster_resources().get("GPU", 0)
+            print(f"Chaining RayInitActor as group {group_id} (Ray already initialized, {int(available_gpus)}/{int(total_gpus)} GPUs available)")
+            if available_gpus < world_size:
+                raise RuntimeError(
+                    f"Not enough GPUs for group {group_id}: need {world_size}, "
+                    f"but only {int(available_gpus)} of {int(total_gpus)} GPUs available in Ray cluster. "
+                    f"The root Ray Init Actor must see enough GPUs for ALL chained groups."
+                )
 
         # Create actors for this group
         ray_actor_fn = make_ray_actor_fn(world_size, self.parallel_dict)
