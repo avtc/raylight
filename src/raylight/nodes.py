@@ -535,7 +535,7 @@ class RayInitializerAdvanced(RayInitializer):
                     "STRING",
                     {
                         "default": "",
-                        "tooltip": "GPU indices for Ray workers. Use comma separated values like 0,1,2 to limit Ray to those GPUs, or leave empty to use all visible GPUs. Useful if you want to reserve GPU 0 for CLIP or VAE.",
+                        "tooltip": "GPU indices visible to Ray. Comma-separated, e.g. '1,2,3,4,5,6'. Leave empty to use all GPUs. Must cover ALL GPUs needed by this node AND any chained RayInitActors (chained nodes can leave this empty). Ray assigns GPUs to actors sequentially from this list.",
                     },
                 ),
                 "ulysses_degree": (
