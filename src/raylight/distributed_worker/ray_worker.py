@@ -231,6 +231,9 @@ class RayWorker:
     def get_parallel_dict(self):
         return self.parallel_dict
 
+    def get_group_id(self):
+        return self.parallel_dict.get("group_id", 0)
+
     def set_parallel_dict(self, parallel_dict):
         self.parallel_dict = parallel_dict
         self.pipefusion_config = PipeFusionConfig.from_parallel_dict(self.parallel_dict)
@@ -777,6 +780,7 @@ def ray_nccl_tester(world_size):
 
 
 def make_ray_actor_fn(world_size, parallel_dict):
+    base_group_id = parallel_dict.get("group_id", 0)
     num_replicas = parallel_dict.get("FSDP_model_replicas", 1)
     shard_size = parallel_dict.get("shard_size", world_size)
 
@@ -786,30 +790,31 @@ def make_ray_actor_fn(world_size, parallel_dict):
         gpu_actors = []
 
         if num_replicas <= 1:
-            # Single replica — all GPUs in one group
+            # Single replica — all GPUs in one NCCL group
             for local_rank in range(world_size):
                 gpu_actors.append(
-                    gpu_actor.options(num_gpus=1, name=f"RayWorker:{local_rank}").remote(
+                    gpu_actor.options(num_gpus=1, name=f"RayWorker:G{base_group_id}_{local_rank}").remote(
                         local_rank=local_rank,
                         device_id=0,
                         parallel_dict=parallel_dict,
                     )
                 )
         else:
-            # Multiple replicas — each replica gets its own NCCL group
-            for group_id in range(num_replicas):
-                group_parallel_dict = dict(parallel_dict)
-                group_parallel_dict["group_id"] = group_id
+            # Multiple replicas — each gets its own NCCL group (port offset)
+            for replica_id in range(num_replicas):
+                replica_parallel_dict = dict(parallel_dict)
+                # Sequential group_id ensures unique NCCL ports across all groups
+                replica_parallel_dict["group_id"] = base_group_id + replica_id
 
                 for local_rank in range(shard_size):
                     gpu_actors.append(
                         gpu_actor.options(
                             num_gpus=1,
-                            name=f"RayWorker:{group_id}_{local_rank}"
+                            name=f"RayWorker:G{base_group_id + replica_id}_{local_rank}",
                         ).remote(
                             local_rank=local_rank,
                             device_id=0,
-                            parallel_dict=group_parallel_dict,
+                            parallel_dict=replica_parallel_dict,
                         )
                     )
 
