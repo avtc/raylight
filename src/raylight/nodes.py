@@ -697,7 +697,7 @@ class RayUNETLoader:
             if num_replicas <= 1:
                 # Single replica — all GPUs share one FSDP-sharded model
                 if parallel_dict["is_quant"] is False:
-                    worker0 = ray.get_actor("RayWorker:0")
+                    worker0 = gpu_actors[0]
                     ray.get(worker0.load_unet.remote(unet_path, model_options=model_options))
                     meta_model = ray.get(worker0.get_meta_model.remote())
 
@@ -727,8 +727,7 @@ class RayUNETLoader:
                     group_actors = gpu_actors[group_id * shard_size : (group_id + 1) * shard_size]
 
                     if parallel_dict["is_quant"] is False:
-                        rank0_name = f"RayWorker:{group_id}_0"
-                        worker0 = ray.get_actor(rank0_name)
+                        worker0 = group_actors[0]
                         ray.get(worker0.load_unet.remote(unet_path, model_options=model_options))
                         meta_model = ray.get(worker0.get_meta_model.remote())
 
