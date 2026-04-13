@@ -33,7 +33,6 @@ from raylight.distributed_worker.parallel_group_manager import (
 )
 from raylight.distributed_worker.utils import Noise_EmptyNoise, Noise_RandomNoise, patch_ray_tqdm
 from raylight.comfy_dist.quant_ops import patch_temp_fix_ck_ops
-from ray.exceptions import RayActorError
 
 
 # Developer reminder, Checking model parameter outside ray actor is very expensive (e.g Comfy main thread)
@@ -823,30 +822,8 @@ def make_ray_actor_fn(world_size, parallel_dict):
     return _init_ray_actor
 
 
-# (TODO-Komikndr) Should be removed since FSDP can be unloaded properly
 def ensure_fresh_actors(ray_actors_init):
     ray_actors, ray_actor_fn = ray_actors_init
     gpu_actors = ray_actors["workers"]
-
-    needs_restart = False
-    try:
-        is_loaded = ray.get(gpu_actors[0].get_is_model_loaded.remote())
-        if is_loaded:
-            needs_restart = True
-    except RayActorError:
-        # Actor already dead or crashed
-        needs_restart = True
-
-    needs_restart = False
-    if needs_restart:
-        for actor in gpu_actors:
-            try:
-                ray.get(actor.kill.remote())
-            except Exception:
-                pass  # ignore already dead
-        ray_actors = ray_actor_fn()
-        gpu_actors = ray_actors["workers"]
-
     parallel_dict = ray.get(gpu_actors[0].get_parallel_dict.remote())
-
     return ray_actors, gpu_actors, parallel_dict
