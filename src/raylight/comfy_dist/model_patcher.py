@@ -167,6 +167,27 @@ def _promote_nonfloating_params_to_meta(model: torch.nn.Module, target_dtype: to
     return replaced
 
 
+def _pre_init_fsdp(diffusion_model: torch.nn.Module) -> None:
+    """Pre-initialize FSDP param groups so the root is always initialized first.
+
+    Without this, a ControlNet calling ``base_model.time_text_embed()`` directly
+    would trigger ``_lazy_init()`` on a *nested* FSDP unit instead of the root,
+    leaving some param groups with stale meta-device references.
+    """
+    from torch.distributed.fsdp._fully_shard._fsdp_state import (
+        _get_module_fsdp_state,
+        FSDPState,
+    )
+
+    root_state = _get_module_fsdp_state(diffusion_model)
+    if root_state is None or not isinstance(root_state, FSDPState):
+        return
+    if root_state._is_root is not None:
+        return  # already initialized
+
+    root_state._lazy_init()
+
+
 def patch_fsdp(self):
     print(f"[Rank {self.rank}] Applying FSDP to {type(self.model.diffusion_model).__name__}")
 
@@ -212,6 +233,8 @@ def patch_fsdp(self):
         )
         set_model_state_dict(self.model, self.fsdp_state_dict, options=options)
         self.fsdp_state_dict = None
+
+    _pre_init_fsdp(diffusion_model)
 
     print("FSDP registered successfully.")
     return self.model
