@@ -17,7 +17,7 @@ from comfy.patcher_extension import CallbacksMP
 from comfy.model_patcher import get_key_weight, string_to_seed, move_weight_functions
 
 from raylight import comfy_dist
-from .fsdp_utils import freeze_and_detect_qt, fully_shard_bottom_up, load_from_full_model_state_dict
+from .fsdp_utils import freeze_and_detect_qt, fully_shard_bottom_up, load_from_full_model_state_dict, materialize_excluded_params
 
 if TYPE_CHECKING:
     from raylight.distributed_worker.parallel_group_manager import XFuserParallelContext
@@ -189,6 +189,31 @@ def _pre_init_fsdp(diffusion_model: torch.nn.Module) -> None:
     root_state._lazy_init()
 
 
+def _collect_controlnet_shared_modules(diffusion_model: torch.nn.Module) -> set[torch.nn.Module]:
+    """Collect base model sub-modules that ControlNet calls directly.
+
+    These modules must NOT be FSDP-wrapped because ControlNet invokes them
+    outside the base model's normal forward path.  If they were FSDP-wrapped,
+    each call would trigger an all_gather that only some ranks participate in,
+    causing an NCCL collective timeout.
+    """
+    # Modules called by QwenImageFunControlNetModel.forward() via base_model.*
+    _CONTROLNET_SHARED_NAMES = (
+        "process_img",
+        "pe_embedder",
+        "img_in",
+        "txt_norm",
+        "txt_in",
+        "time_text_embed",
+    )
+    excluded: set[torch.nn.Module] = set()
+    for name in _CONTROLNET_SHARED_NAMES:
+        mod = getattr(diffusion_model, name, None)
+        if mod is not None and isinstance(mod, torch.nn.Module) and any(True for _ in mod.parameters()):
+            excluded.add(mod)
+    return excluded
+
+
 def patch_fsdp(self):
     print(f"[Rank {self.rank}] Applying FSDP to {type(self.model.diffusion_model).__name__}")
 
@@ -211,12 +236,36 @@ def patch_fsdp(self):
         if replaced > 0:
             print(f"[Rank {self.rank}] Promoted {replaced} non-floating quant params to meta placeholders before FSDP wrapping")
 
-    fully_shard_bottom_up(diffusion_model, fsdp_kwargs=fsdp_kwargs, native_ignore_scale=not use_quant_loader)
+    excluded_modules = _collect_controlnet_shared_modules(diffusion_model)
+    if excluded_modules:
+        print(f"[Rank {self.rank}] Excluding {len(excluded_modules)} ControlNet-shared modules from FSDP: "
+              f"{[n for n, m in diffusion_model.named_modules() if m in excluded_modules]}")
+
+    fully_shard_bottom_up(
+        diffusion_model,
+        fsdp_kwargs=fsdp_kwargs,
+        native_ignore_scale=not use_quant_loader,
+        ignored_modules=excluded_modules,
+    )
+
+    target_device = (
+        self.load_device if isinstance(self.load_device, torch.device) else torch.device("cuda", torch.cuda.current_device())
+    )
+
+    # Materialize excluded params before set_model_state_dict so it doesn't
+    # encounter meta tensors for non-FSDP parameters.
+    if excluded_modules:
+        count = materialize_excluded_params(
+            model=self.model,
+            excluded_modules=excluded_modules,
+            full_sd=self.fsdp_state_dict,
+            device=target_device,
+            cpu_offload=self.is_cpu_offload,
+        )
+        if count > 0:
+            print(f"[Rank {self.rank}] Materialized {count} excluded ControlNet-shared params on {target_device}")
 
     if use_quant_loader:
-        target_device = (
-            self.load_device if isinstance(self.load_device, torch.device) else torch.device("cuda", torch.cuda.current_device())
-        )
         load_from_full_model_state_dict(
             model=self.model,
             full_sd=self.fsdp_state_dict,
@@ -233,7 +282,8 @@ def patch_fsdp(self):
             broadcast_from_rank0=True,
         )
         set_model_state_dict(self.model, self.fsdp_state_dict, options=options)
-        self.fsdp_state_dict = None
+
+    self.fsdp_state_dict = None
 
     _pre_init_fsdp(diffusion_model)
 
