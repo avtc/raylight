@@ -36,6 +36,54 @@ from raylight.comfy_dist.quant_ops import patch_temp_fix_ck_ops
 from ray.exceptions import RayActorError
 
 
+def _remap_conditioning_devices(positive, negative):
+    """Remap CUDA device references in conditioning to cuda:0.
+
+    Conditioning is created in the main ComfyUI process where CUDA device
+    indices map to physical GPUs.  Inside a ray worker, CUDA_VISIBLE_DEVICES
+    is set to a single physical GPU, so only cuda:0 is valid.  Any model
+    device (VAE, ControlNet, etc.) that references cuda:N (N>0) will fail.
+    """
+    target = torch.device("cuda:0")
+    for cond_list in (positive, negative):
+        if cond_list is None:
+            continue
+        for item in cond_list:
+            cond = item[0] if isinstance(item, (list, tuple)) and len(item) >= 1 else item
+            if not isinstance(cond, dict):
+                continue
+            control = cond.get("control")
+            if control is not None:
+                _remap_control_devices(control, target)
+
+
+def _remap_control_devices(control, target):
+    vae = getattr(control, "vae", None)
+    if vae is not None:
+        _remap_cuda_device(vae, "device", target)
+        _remap_cuda_device(vae, "output_device", target)
+        patcher = getattr(vae, "patcher", None)
+        if patcher is not None:
+            _remap_patcher_device(patcher, target)
+    model_wrapped = getattr(control, "control_model_wrapped", None)
+    if model_wrapped is not None:
+        _remap_patcher_device(model_wrapped, target)
+    _remap_cuda_device(control, "load_device", target)
+    prev = getattr(control, "previous_controlnet", None)
+    if prev is not None:
+        _remap_control_devices(prev, target)
+
+
+def _remap_patcher_device(patcher, target):
+    _remap_cuda_device(patcher, "load_device", target)
+
+
+def _remap_cuda_device(obj, attr, target):
+    val = getattr(obj, attr, None)
+    if isinstance(val, torch.device) and val.type == "cuda":
+        setattr(obj, attr, target)
+
+
 # Developer reminder, Checking model parameter outside ray actor is very expensive (e.g Comfy main thread)
 # the model need to be serialized, send to object store and can cause OOM !, so setter and getter is the pattern !
 
@@ -765,6 +813,8 @@ class RayWorker:
         noise_mask = None
         if "noise_mask" in latent:
             noise_mask = latent["noise_mask"]
+
+        _remap_conditioning_devices(positive, negative)
 
         disable_pbar = comfy_utils.PROGRESS_BAR_ENABLED
         if self.local_rank == 0:

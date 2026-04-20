@@ -545,43 +545,6 @@ class FSDPModelPatcher(comfy.model_patcher.ModelPatcher):
             # Break reference cycle so the inner model can be collected
             if hasattr(model, "current_patcher"):
                 model.current_patcher = None
-            try:
-                has_qt_hint = self._has_quantized_dtensor_shards
-                for m in model.modules():
-                    for p in m.parameters(recurse=False):
-                        try:
-                            tensor = p.data if isinstance(p, torch.Tensor) else None
-                            if tensor is None:
-                                continue
-
-                            if isinstance(tensor, DTensor):
-                                if has_qt_hint is True:
-                                    continue
-
-                                try:
-                                    local = getattr(tensor, "_local_tensor", None)
-                                    if local is None:
-                                        local = tensor.to_local()
-                                except Exception:
-                                    continue
-
-                                if has_qt_hint is None:
-                                    has_qt_hint = _is_quantized_tensor_like(local)
-                                    self._has_quantized_dtensor_shards = has_qt_hint
-
-                                if has_qt_hint is True:
-                                    continue
-                                _safe_free_storage(local.data)
-                                continue
-
-                            if _is_quantized_tensor_like(tensor):
-                                continue
-
-                            _safe_free_storage(tensor.data)
-                        except Exception:
-                            continue
-            except Exception:
-                pass
 
         self.model = None
         try:
