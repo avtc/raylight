@@ -6,6 +6,7 @@ import gc
 from typing import TYPE_CHECKING
 
 import torch
+import torch.distributed as dist
 from torch.distributed.fsdp import FSDPModule
 from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 from torch.distributed.utils import _free_storage
@@ -269,6 +270,17 @@ class FSDPModelPatcher(comfy.model_patcher.ModelPatcher):
 
     def is_dynamic(self):
         return True
+
+    def model_size(self):
+        if self.size > 0:
+            return self.size
+        total = comfy.model_management.module_size(self.model)
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        if world_size > 1:
+            self.size = total // world_size
+        else:
+            self.size = total
+        return self.size
 
     def config_fsdp(self, rank, device_mesh):
         self.rank = rank
