@@ -1,6 +1,8 @@
 import raylight
 import os
 import gc
+import shutil
+import tempfile
 from typing import Any
 from pathlib import Path
 from copy import deepcopy
@@ -19,6 +21,18 @@ from .distributed_worker.ray_worker import (
     ensure_fresh_actors,
     ray_nccl_tester,
 )
+
+
+def _cleanup_ray_temp():
+    """Remove stale Ray plasma/session directories from previous runs."""
+    ray_tmpdir = os.environ.get("RAY_TMPDIR", "/tmp")
+    ray_dir = os.path.join(ray_tmpdir, "ray")
+    if not os.path.isdir(ray_dir):
+        return
+    try:
+        shutil.rmtree(ray_dir, ignore_errors=True)
+    except Exception:
+        pass
 
 
 # Workaround https://github.com/comfyanonymous/ComfyUI/pull/11134
@@ -408,6 +422,7 @@ class RayInitializer:
         try:
             # Shut down so if comfy user try another workflow it will not cause error
             ray.shutdown()
+            _cleanup_ray_temp()
             original_cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
             restricted_cuda_visible_devices = runtime_env_base.get("env_vars", {}).get("CUDA_VISIBLE_DEVICES")
             if restricted_cuda_visible_devices is not None:
@@ -430,6 +445,7 @@ class RayInitializer:
                         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         except Exception as e:
             ray.shutdown()
+            _cleanup_ray_temp()
             if restricted_cuda_visible_devices is not None:
                 os.environ["CUDA_VISIBLE_DEVICES"] = restricted_cuda_visible_devices
             try:
@@ -1090,6 +1106,7 @@ class RayKill:
 
         if kill_mode == "Kill Entire Cluster":
             ray.shutdown()
+            _cleanup_ray_temp()
 
         return ()
 
