@@ -1111,6 +1111,113 @@ class RayKill:
         return ()
 
 
+class RayControlNetLoader:
+    """Load a ControlNet model into all Ray workers.
+
+    Works like the standard ControlNetLoader but loads the model on each
+    worker's GPU from disk, avoiding Ray serialization of multi-GB weights.
+    Returns a lightweight reference that RayControlNetApply uses.
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "ray_actors": ("RAY_ACTORS",),
+                "control_net_name": (folder_paths.get_filename_list("controlnet"),),
+            }
+        }
+
+    RETURN_TYPES = ("RAY_CONTROL_NET",)
+    FUNCTION = "load_controlnet"
+    CATEGORY = "Raylight"
+
+    def load_controlnet(self, ray_actors, control_net_name):
+        controlnet_path = folder_paths.get_full_path_or_raise("controlnet", control_net_name)
+
+        # Validate the ControlNet loads in the main process first
+        controlnet = comfy.controlnet.load_controlnet(controlnet_path)
+        if controlnet is None:
+            raise RuntimeError(f"Invalid ControlNet file: {control_net_name}")
+
+        # Send the path to all workers — each loads from disk independently
+        gpu_actors = ray_actors["workers"]
+        futures = [actor.load_controlnet.remote(controlnet_path) for actor in gpu_actors]
+        results = ray.get(futures)
+        if not all(results):
+            raise RuntimeError(f"Failed to load ControlNet on one or more workers: {control_net_name}")
+
+        return (controlnet_path,)
+
+
+class RayControlNetApply:
+    """Apply a Ray-loaded ControlNet to conditioning.
+
+    Works like ApplyControlNet but uses a lightweight reference instead of
+    embedding the full model in the conditioning data.  The workers restore
+    the real ControlNet from their local cache during sampling.
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "positive": ("CONDITIONING",),
+                "negative": ("CONDITIONING",),
+                "ray_control_net": ("RAY_CONTROL_NET",),
+                "image": ("IMAGE",),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01}),
+                "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.001}),
+                "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
+            },
+            "optional": {
+                "vae": ("VAE",),
+            },
+        }
+
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING")
+    RETURN_NAMES = ("positive", "negative")
+    FUNCTION = "apply_controlnet"
+    CATEGORY = "Raylight"
+
+    def apply_controlnet(self, positive, negative, ray_control_net, image, strength,
+                         start_percent, end_percent, vae=None, extra_concat=[]):
+        from .distributed_worker.ray_worker import _RayControlNetRef
+
+        if strength == 0:
+            return (positive, negative)
+
+        control_hint = image.movedim(-1, 1)
+        cnets = {}
+
+        out = []
+        for conditioning in [positive, negative]:
+            c = []
+            for t in conditioning:
+                d = t[1].copy()
+
+                prev_cnet = d.get("control", None)
+                if prev_cnet in cnets:
+                    c_net = cnets[prev_cnet]
+                else:
+                    c_net = _RayControlNetRef(
+                        strength=strength,
+                        timestep_percent_range=(start_percent, end_percent),
+                        cond_hint_original=control_hint,
+                        extra_concat_orig=extra_concat,
+                    )
+                    if prev_cnet is not None:
+                        c_net.set_previous_controlnet(prev_cnet)
+                    cnets[prev_cnet] = c_net
+
+                d["control"] = c_net
+                d["control_apply_to_uncond"] = False
+                n = [t[0], d]
+                c.append(n)
+            out.append(c)
+        return (out[0], out[1])
+
+
 class Noise_RandomNoise:
     def __init__(self, seed):
         self.seed = seed
@@ -1255,6 +1362,8 @@ NODE_CLASS_MAPPINGS = {
     "RayKill": RayKill,
     "RayUNETLoader": RayUNETLoader,
     "RayLoraLoader": RayLoraLoader,
+    "RayControlNetLoader": RayControlNetLoader,
+    "RayControlNetApply": RayControlNetApply,
     "RayInitializer": RayInitializer,
     "RayInitializerAdvanced": RayInitializerAdvanced,
     "DPNoiseList": DPNoiseList,
@@ -1268,6 +1377,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RayKill": "Kill Ray",
     "RayUNETLoader": "Load Diffusion Model (Ray)",
     "RayLoraLoader": "Load Lora Model (Ray)",
+    "RayControlNetLoader": "Load ControlNet (Ray)",
+    "RayControlNetApply": "Apply ControlNet (Ray)",
     "RayInitializer": "Ray Init Actor",
     "RayInitializerAdvanced": "Ray Init Actor (Advanced)",
     "DPNoiseList": "Data Parallel Noise List",

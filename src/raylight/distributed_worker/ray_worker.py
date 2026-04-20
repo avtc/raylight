@@ -36,6 +36,105 @@ from raylight.comfy_dist.quant_ops import patch_temp_fix_ck_ops
 from ray.exceptions import RayActorError
 
 
+class _RayControlNetRef:
+    """Lightweight placeholder for a ControlNet in conditioning.
+
+    Created by RayControlNetApply in the main process.  Carries only the
+    hint image and apply settings — no model weights.  Workers replace
+    this with a real ControlNet loaded from their local cache.
+    """
+
+    def __init__(self, strength, timestep_percent_range, cond_hint_original,
+                 extra_concat_orig=None, previous_controlnet=None):
+        self.strength = strength
+        self.timestep_percent_range = timestep_percent_range
+        self.cond_hint_original = cond_hint_original
+        self.extra_concat_orig = list(extra_concat_orig or [])
+        self.previous_controlnet = previous_controlnet
+
+        # ControlBase interface stubs needed by ComfyUI internals
+        self.cond_hint = None
+        self.global_average_pooling = False
+        self.compression_ratio = 1
+        self.upscale_algorithm = "nearest-exact"
+        self.extra_args = {}
+        self.extra_conds = []
+        self.strength_type = None
+        self.concat_mask = False
+        self.extra_hooks = None
+        self.preprocess_image = lambda a: a
+        self.model_sampling_current = None
+        self.latent_format = None
+        self.vae = None
+
+    def set_cond_hint(self, *args, **kwargs):
+        pass
+
+    def set_previous_controlnet(self, prev):
+        self.previous_controlnet = prev
+
+    def copy(self):
+        c = _RayControlNetRef(
+            self.strength,
+            self.timestep_percent_range,
+            self.cond_hint_original,
+            self.extra_concat_orig,
+            self.previous_controlnet,
+        )
+        return c
+
+    def pre_run(self, model, percent_to_timestep_function):
+        pass
+
+    def get_models(self):
+        return []
+
+    def get_extra_hooks(self):
+        hooks = []
+        if self.previous_controlnet is not None:
+            hooks += self.previous_controlnet.get_extra_hooks()
+        return hooks
+
+    def cleanup(self):
+        pass
+
+    def inference_memory_requirements(self, dtype):
+        return 0
+
+
+def _restore_controlnet_refs(cond_list, cached_controlnet):
+    """Replace _RayControlNetRef placeholders with real ControlNet objects."""
+    if cond_list is None or cached_controlnet is None:
+        return
+
+    _, cnet_template = cached_controlnet
+
+    for item in cond_list:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            d = item[1]
+        elif isinstance(item, dict):
+            d = item
+        else:
+            continue
+        if not isinstance(d, dict):
+            continue
+
+        control = d.get("control")
+        if not isinstance(control, _RayControlNetRef):
+            continue
+
+        cnet = cnet_template.copy()
+        cnet.cond_hint_original = control.cond_hint_original
+        cnet.strength = control.strength
+        cnet.timestep_percent_range = control.timestep_percent_range
+        if control.extra_concat_orig:
+            cnet.extra_concat_orig = list(control.extra_concat_orig)
+        if control.previous_controlnet is not None:
+            cnet.set_previous_controlnet(control.previous_controlnet)
+
+        d["control"] = cnet
+
+
 def _remap_conditioning_devices(positive, negative):
     """Remap CUDA device references in conditioning to cuda:0.
 
@@ -166,6 +265,7 @@ class RayWorker:
         self.vae_model = None
         self.model_type = None
         self.state_dict = None
+        self.cached_controlnet = None  # (path, controlnet_object) cache
         self.lora_list = None
         self.parallel_dict = parallel_dict
         self.overwrite_cast_dtype = None
@@ -824,6 +924,27 @@ class RayWorker:
         gc.collect()
         return out
 
+    def load_controlnet(self, controlnet_path):
+        """Load a ControlNet model from disk into the worker.
+
+        Caches the result so subsequent calls with the same path are free.
+        Returns True on success.
+        """
+        if self.cached_controlnet is not None and self.cached_controlnet[0] == controlnet_path:
+            return True
+
+        import comfy.controlnet as comfy_cnet
+
+        cnet = comfy_cnet.load_controlnet(controlnet_path)
+        if cnet is None:
+            print(f"[Rank {self.local_rank}] Failed to load ControlNet: {controlnet_path}")
+            return False
+
+        self.cached_controlnet = (controlnet_path, cnet)
+        if self.local_rank == 0:
+            print(f"[Rank {self.local_rank}] ControlNet loaded and cached from {controlnet_path}")
+        return True
+
     @patch_temp_fix_ck_ops
     @patch_ray_tqdm
     @patch_enable_comfy_kitchen_fsdp
@@ -846,6 +967,10 @@ class RayWorker:
         import comfy.model_management as comfy_model_management
         import comfy.sample as comfy_sample
         import comfy.utils as comfy_utils
+
+        # Restore ControlNet refs from local cache (loaded by load_controlnet)
+        _restore_controlnet_refs(positive, self.cached_controlnet)
+        _restore_controlnet_refs(negative, self.cached_controlnet)
 
         latent_image = latent["samples"]
         latent_image = comfy_sample.fix_empty_latent_channels(self.model, latent_image)
