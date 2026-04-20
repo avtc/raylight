@@ -530,6 +530,7 @@ class FSDPModelPatcher(comfy.model_patcher.ModelPatcher):
             self.model.model_loaded_weight_memory = mem_counter
             self.model.model_offload_buffer_memory = 0
             self.model.current_weight_patches_uuid = self.patches_uuid
+            self.model.current_patcher = self
 
             for callback in self.get_all_callbacks(CallbacksMP.ON_LOAD):
                 callback(self, device_to, lowvram_model_memory, force_patch_weights, full_load)
