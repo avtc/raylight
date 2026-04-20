@@ -49,7 +49,13 @@ def _remap_conditioning_devices(positive, negative):
         if cond_list is None:
             continue
         for item in cond_list:
-            cond = item[0] if isinstance(item, (list, tuple)) and len(item) >= 1 else item
+            # Conditioning items are [tensor, dict] — the dict is at index 1.
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                cond = item[1]
+            elif isinstance(item, dict):
+                cond = item
+            else:
+                continue
             if not isinstance(cond, dict):
                 continue
             control = cond.get("control")
@@ -76,6 +82,7 @@ def _remap_control_devices(control, target):
 
 def _remap_patcher_device(patcher, target):
     _remap_cuda_device(patcher, "load_device", target)
+    _remap_cuda_device(patcher, "offload_device", target)
 
 
 def _remap_cuda_device(obj, attr, target):
