@@ -80,6 +80,53 @@ def _remap_control_devices(control, target):
         _remap_control_devices(prev, target)
 
 
+def _move_control_to_device(control, device):
+    """Move ControlNet model weights to the worker's GPU.
+
+    Ray deserializes the ControlNet model on CPU.  Without this, only rank 0
+    loads the model via load_models_gpu(), leaving other ranks unable to run
+    the ControlNet forward.  This ensures every rank has the model on its GPU.
+    """
+    model_wrapped = getattr(control, "control_model_wrapped", None)
+    if model_wrapped is not None:
+        model = getattr(model_wrapped, "model", None)
+        if model is not None:
+            try:
+                model.to(device)
+            except Exception:
+                pass
+    # Also move the hint tensor if it's already materialized
+    cond_hint = getattr(control, "cond_hint", None)
+    if isinstance(cond_hint, torch.Tensor) and cond_hint.device.type == "cpu":
+        try:
+            control.cond_hint = cond_hint.to(device)
+        except Exception:
+            pass
+    prev = getattr(control, "previous_controlnet", None)
+    if prev is not None:
+        _move_control_to_device(prev, device)
+
+
+def _prepare_control_models(positive, negative):
+    """Remap devices AND move ControlNet model weights to the worker's GPU."""
+    target = torch.device("cuda:0")
+    for cond_list in (positive, negative):
+        if cond_list is None:
+            continue
+        for item in cond_list:
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                cond = item[1]
+            elif isinstance(item, dict):
+                cond = item
+            else:
+                continue
+            if not isinstance(cond, dict):
+                continue
+            control = cond.get("control")
+            if control is not None:
+                _move_control_to_device(control, target)
+
+
 def _remap_patcher_device(patcher, target):
     _remap_cuda_device(patcher, "load_device", target)
     _remap_cuda_device(patcher, "offload_device", target)
@@ -822,6 +869,7 @@ class RayWorker:
             noise_mask = latent["noise_mask"]
 
         _remap_conditioning_devices(positive, negative)
+        _prepare_control_models(positive, negative)
 
         disable_pbar = comfy_utils.PROGRESS_BAR_ENABLED
         if self.local_rank == 0:
