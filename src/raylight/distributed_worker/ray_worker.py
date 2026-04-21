@@ -909,6 +909,10 @@ class RayWorker:
         import comfy.sample as comfy_sample
         import comfy.utils as comfy_utils
 
+        # Restore ControlNet refs from local cache (loaded by load_controlnet)
+        _restore_controlnet_refs(positive, self.cached_controlnet, self.vae_model)
+        _restore_controlnet_refs(negative, self.cached_controlnet, self.vae_model)
+
         latent = latent_image
         latent_image = latent["samples"]
         latent = latent.copy()
@@ -923,6 +927,9 @@ class RayWorker:
         noise_mask = None
         if "noise_mask" in latent:
             noise_mask = latent["noise_mask"]
+
+        _remap_conditioning_devices(positive, negative)
+        _prepare_control_models(positive, negative)
 
         if self.parallel_dict["is_fsdp"] is True:
             self.model.patch_fsdp()

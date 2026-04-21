@@ -220,7 +220,7 @@ Activate FSDP, and set the Ulysses degree to the number of GPUs. Use the XFuser 
 | Model             | USP | FSDP | CFG |
 |-------------------|-----|------|-----|
 | Qwen Image/Edit   | ✅  | ✅   | ✅  |
-| ControlNet        | ❌  | ❌   | ✅  |
+| ControlNet        | ✅  | ✅   | ✅  |
 
 
 **Z Image, Lumina 2**
