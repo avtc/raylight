@@ -1,6 +1,7 @@
 import os
 import sys
 import gc
+import types
 import functools
 from datetime import timedelta
 
@@ -359,6 +360,22 @@ class RayWorker:
         else:
             raise ValueError("Model being set is not meta, can cause OOM in large model")
 
+    def _free_cached_aux_models(self):
+        """Free cached ControlNet and VAE GPU memory."""
+        if self.cached_controlnet is not None:
+            _, old_cnet = self.cached_controlnet
+            old_model = getattr(old_cnet, "control_model", None)
+            if old_model is not None:
+                del old_model
+            self.cached_controlnet = None
+
+        if self.vae_model is not None:
+            del self.vae_model
+            self.vae_model = None
+            self._cached_vae_path = None
+
+        torch.cuda.empty_cache()
+
     def _free_current_model(self):
         """Eagerly free the current model's GPU storage.
 
@@ -390,6 +407,7 @@ class RayWorker:
         self.model = None
         self.overwrite_cast_dtype = None
         self.active_request_key = None
+        self._free_cached_aux_models()
         gc.collect()
         comfy_model_management.soft_empty_cache()
 
@@ -608,6 +626,7 @@ class RayWorker:
                     self.model.free_fsdp_vram()
                 except Exception as e:
                     print(f"[Rank {self.local_rank}] free_fsdp_vram failed: {e}")
+                self._free_cached_aux_models()
 
 
             # Monkey patch
@@ -693,6 +712,7 @@ class RayWorker:
 
             self._reset_active_model()
             self._invalidate_non_fsdp_cache()
+            self._free_cached_aux_models()
             if self.parallel_dict.get("pipefusion_enabled"):
                 from raylight.comfy_dist.sd import pipefusion_load_diffusion_model
 
@@ -734,6 +754,7 @@ class RayWorker:
     def load_gguf_unet(self, unet_path, dequant_dtype, patch_dtype, use_mmap=None):
         self._reset_active_model()
         self._invalidate_non_fsdp_cache()
+        self._free_cached_aux_models()
         if use_mmap is None:
             use_mmap = self.parallel_dict.get("use_mmap", True)
         if self.parallel_dict["is_fsdp"] is True:
@@ -802,12 +823,23 @@ class RayWorker:
             del lora_model
 
     def kill(self):
+        self._free_cached_aux_models()
         self._invalidate_non_fsdp_cache()
         self.model = None
         dist.destroy_process_group()
         ray.actor.exit_actor()
 
     def ray_vae_loader(self, vae_path):
+        if self.vae_model is not None and getattr(self, "_cached_vae_path", None) == vae_path:
+            return
+
+        # Free old VAE before loading new one
+        if self.vae_model is not None:
+            del self.vae_model
+            self.vae_model = None
+            self._cached_vae_path = None
+            torch.cuda.empty_cache()
+
         import comfy.sd as comfy_sd
         import comfy.utils as comfy_utils
 
@@ -829,6 +861,7 @@ class RayWorker:
         if self.local_rank == 0:
             print(f"VAE loaded in {self.global_world_size} GPUs")
         self.vae_model = vae_model
+        self._cached_vae_path = vae_path
 
     @patch_ray_tqdm
     def ray_vae_decode(self, samples, tile_size, overlap=64, temporal_size=64, temporal_overlap=8):
@@ -932,10 +965,21 @@ class RayWorker:
         """Load a ControlNet model from disk into the worker.
 
         Caches the result so subsequent calls with the same path are free.
+        Frees old ControlNet VRAM when the path changes.
         Returns True on success.
         """
         if self.cached_controlnet is not None and self.cached_controlnet[0] == controlnet_path:
             return True
+
+        # Free old ControlNet VRAM if model changed
+        if self.cached_controlnet is not None:
+            _, old_cnet = self.cached_controlnet
+            old_model = getattr(old_cnet, "control_model", None)
+            if old_model is not None:
+                del old_model
+            self.cached_controlnet = None
+            torch.cuda.empty_cache()
+            gc.collect()
 
         import comfy.controlnet as comfy_cnet
 
@@ -948,6 +992,30 @@ class RayWorker:
         if self.local_rank == 0:
             print(f"[Rank {self.local_rank}] ControlNet loaded and cached from {controlnet_path}")
         return True
+
+    def free_cached_controlnet(self):
+        """Explicitly free the cached ControlNet (e.g. when switching workflows)."""
+        if self.cached_controlnet is not None:
+            _, old_cnet = self.cached_controlnet
+            old_model = getattr(old_cnet, "control_model", None)
+            if old_model is not None:
+                del old_model
+            self.cached_controlnet = None
+            torch.cuda.empty_cache()
+            gc.collect()
+            if self.local_rank == 0:
+                print(f"[Rank {self.local_rank}] ControlNet cache freed")
+
+    def free_cached_vae(self):
+        """Explicitly free the cached VAE (e.g. when switching workflows)."""
+        if self.vae_model is not None:
+            del self.vae_model
+            self.vae_model = None
+            self._cached_vae_path = None
+            torch.cuda.empty_cache()
+            gc.collect()
+            if self.local_rank == 0:
+                print(f"[Rank {self.local_rank}] VAE cache freed")
 
     @patch_temp_fix_ck_ops
     @patch_ray_tqdm
