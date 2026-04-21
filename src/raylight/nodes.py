@@ -423,6 +423,7 @@ class RayInitializer:
             # Shut down so if comfy user try another workflow it will not cause error
             ray.shutdown()
             _cleanup_ray_temp()
+            RayControlNetLoader._current_controlnet_path = None
             original_cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
             restricted_cuda_visible_devices = runtime_env_base.get("env_vars", {}).get("CUDA_VISIBLE_DEVICES")
             if restricted_cuda_visible_devices is not None:
@@ -1107,6 +1108,7 @@ class RayKill:
         if kill_mode == "Kill Entire Cluster":
             ray.shutdown()
             _cleanup_ray_temp()
+            RayControlNetLoader._current_controlnet_path = None
 
         return ()
 
@@ -1117,7 +1119,13 @@ class RayControlNetLoader:
     Works like the standard ControlNetLoader but loads the model on each
     worker's GPU from disk, avoiding Ray serialization of multi-GB weights.
     Returns a lightweight reference that RayControlNetApply uses.
+
+    Only one ControlNet model per workflow is supported. To apply the same
+    model with different images/strengths, use multiple RayControlNetApply
+    nodes connected to a single RayControlNetLoader.
     """
+
+    _current_controlnet_path = None
 
     @classmethod
     def INPUT_TYPES(s):
@@ -1135,10 +1143,22 @@ class RayControlNetLoader:
     def load_controlnet(self, ray_actors, control_net_name):
         controlnet_path = folder_paths.get_full_path_or_raise("controlnet", control_net_name)
 
+        if (RayControlNetLoader._current_controlnet_path is not None
+                and RayControlNetLoader._current_controlnet_path != controlnet_path):
+            raise RuntimeError(
+                f"Only one ControlNet model per workflow is supported. "
+                f"Already loaded '{RayControlNetLoader._current_controlnet_path}', "
+                f"attempted '{controlnet_path}'. Use multiple RayControlNetApply nodes "
+                f"to apply the same model with different images."
+            )
+        RayControlNetLoader._current_controlnet_path = controlnet_path
+
         # Validate the ControlNet loads in the main process first
         controlnet = comfy.controlnet.load_controlnet(controlnet_path)
         if controlnet is None:
             raise RuntimeError(f"Invalid ControlNet file: {control_net_name}")
+        del controlnet
+        gc.collect()
 
         # Send the path to all workers — each loads from disk independently
         gpu_actors = ray_actors["workers"]
@@ -1181,11 +1201,14 @@ class RayControlNetApply:
     CATEGORY = "Raylight"
 
     def apply_controlnet(self, positive, negative, ray_control_net, image, strength,
-                         start_percent, end_percent, ray_vae=None, extra_concat=[]):
+                         start_percent, end_percent, ray_vae=None, extra_concat=None):
         from .distributed_worker.ray_worker import _RayControlNetRef
 
         if strength == 0:
             return (positive, negative)
+
+        if extra_concat is None:
+            extra_concat = []
 
         control_hint = image.movedim(-1, 1)
         cnets = {}

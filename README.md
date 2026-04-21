@@ -272,6 +272,9 @@ Activate FSDP, and set the Ulysses degree to the number of GPUs. Use the XFuser 
   but since these models do not support conditional batches (CFG = 1), enabling it has no effect.
 - Chroma and Hunyuan Video ControlNet support is implemented in the USP/FSDP code paths
   but no ControlNet model weights are currently available in ComfyUI to test with.
+- Only one ControlNet model per workflow is supported. To apply the same model with
+  different images or strengths, use multiple Apply ControlNet (Ray) nodes connected
+  to a single Load ControlNet (Ray) node.
 
 ## Attention
 

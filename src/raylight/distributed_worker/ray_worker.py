@@ -135,7 +135,19 @@ def _restore_controlnet_refs(cond_list, cached_controlnet, worker_vae=None):
         if control.needs_vae and worker_vae is not None:
             cnet.vae = worker_vae
         if control.previous_controlnet is not None:
-            cnet.set_previous_controlnet(control.previous_controlnet)
+            prev = control.previous_controlnet
+            if isinstance(prev, _RayControlNetRef):
+                prev_cnet = cnet_template.copy()
+                prev_cnet.cond_hint_original = prev.cond_hint_original
+                prev_cnet.strength = prev.strength
+                prev_cnet.timestep_percent_range = prev.timestep_percent_range
+                if prev.extra_concat_orig:
+                    prev_cnet.extra_concat_orig = list(prev.extra_concat_orig)
+                if prev.needs_vae and worker_vae is not None:
+                    prev_cnet.vae = worker_vae
+                cnet.set_previous_controlnet(prev_cnet)
+            else:
+                cnet.set_previous_controlnet(prev)
 
         d["control"] = cnet
 
@@ -375,8 +387,8 @@ class RayWorker:
             self._cached_vae_path = None
 
         torch.cuda.empty_cache()
+        gc.collect()
 
-    def _free_current_model(self):
         """Eagerly free the current model's GPU storage.
 
         Handles both FSDP models (DTensor shards) and non-FSDP models.
@@ -1071,6 +1083,9 @@ class RayWorker:
         noise_mask = None
         if "noise_mask" in latent:
             noise_mask = latent["noise_mask"]
+
+        _remap_conditioning_devices(positive, negative)
+        _prepare_control_models(positive, negative)
 
         _remap_conditioning_devices(positive, negative)
         _prepare_control_models(positive, negative)
