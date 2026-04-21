@@ -197,7 +197,12 @@ def _collect_controlnet_shared_modules(diffusion_model: torch.nn.Module) -> set[
     each call would trigger an all_gather that only some ranks participate in,
     causing an NCCL collective timeout.
     """
-    # Modules called by QwenImageFunControlNetModel.forward() via base_model.*
+    # Modules called by ControlNet.forward() via base_model.* (getattr skips
+    # names that don't exist on a given architecture, so the union is safe).
+    #   QwenImage FunControlNet: process_img, pe_embedder, img_in, txt_norm,
+    #                             txt_in, time_text_embed
+    #   Flux ControlNet:          img_in, time_in, vector_in, guidance_in,
+    #                             txt_in, pe_embedder
     _CONTROLNET_SHARED_NAMES = (
         "process_img",
         "pe_embedder",
@@ -205,6 +210,9 @@ def _collect_controlnet_shared_modules(diffusion_model: torch.nn.Module) -> set[
         "txt_norm",
         "txt_in",
         "time_text_embed",
+        "time_in",
+        "vector_in",
+        "guidance_in",
     )
     excluded: set[torch.nn.Module] = set()
     for name in _CONTROLNET_SHARED_NAMES:

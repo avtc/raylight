@@ -205,7 +205,7 @@ Activate FSDP, and set the Ulysses degree to the number of GPUs. Use the XFuser 
 | Flux Kontext      | ✅  | ✅   | ❌  |
 | Flux Krea         | ✅  | ✅   | ❌  |
 | Flux 2            | ✅  | ✅   | ❌  |
-| Flux ControlNet   | ❌  | ❌   | ❌  |
+| Flux ControlNet   | ✅  | ✅   | ❌  |
 
 
 **Chroma**
@@ -213,7 +213,7 @@ Activate FSDP, and set the Ulysses degree to the number of GPUs. Use the XFuser 
 |-------------------|-----|------|-----|
 | Chroma            | ✅  | ✅   | ✅  |
 | Chroma Radiance   | ✅  | ✅   | ✅  |
-| Chroma ControlNet | ❌  | ❌   | ✅  |
+| Chroma ControlNet | ✅† | ✅†  | ✅  |
 
 
 **Qwen**
@@ -235,7 +235,7 @@ Activate FSDP, and set the Ulysses degree to the number of GPUs. Use the XFuser 
 |-------------------|-----|------|-----|
 | Hunyuan Video     | ✅  | ✅   | ❌  |
 | Hunyuan 1.5       | ✅  | ✅   | ❌  |
-| ControlNet        | ❌  | ❌   | ❌  |
+| ControlNet        | ✅† | ✅†  | ❌  |
 
 
 **Kandinsky5**
@@ -260,6 +260,7 @@ Activate FSDP, and set the Ulysses degree to the number of GPUs. Use the XFuser 
 **Legend:**
 - ✅ = Supported
 - ❌ = Not currently supported.
+- ✅† = Code-ready, awaiting ControlNet model weights.
 - T = Text
 - I = Image
 - A = Audio
@@ -269,6 +270,8 @@ Activate FSDP, and set the Ulysses degree to the number of GPUs. Use the XFuser 
 - Non standard Wan variant (Phantom, S2V, etc...) is not tested
 - CFG parallel for Flux, Hunyuan, is technically supported by Raylight,
   but since these models do not support conditional batches (CFG = 1), enabling it has no effect.
+- Chroma and Hunyuan Video ControlNet support is implemented in the USP/FSDP code paths
+  but no ControlNet model weights are currently available in ComfyUI to test with.
 
 ## Attention
 
