@@ -1171,7 +1171,7 @@ class RayControlNetApply:
                 "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
             },
             "optional": {
-                "vae": ("VAE",),
+                "ray_vae": ("RAY_VAE",),
             },
         }
 
@@ -1181,7 +1181,7 @@ class RayControlNetApply:
     CATEGORY = "Raylight"
 
     def apply_controlnet(self, positive, negative, ray_control_net, image, strength,
-                         start_percent, end_percent, vae=None, extra_concat=[]):
+                         start_percent, end_percent, ray_vae=None, extra_concat=[]):
         from .distributed_worker.ray_worker import _RayControlNetRef
 
         if strength == 0:
@@ -1205,7 +1205,7 @@ class RayControlNetApply:
                         timestep_percent_range=(start_percent, end_percent),
                         cond_hint_original=control_hint,
                         extra_concat_orig=extra_concat,
-                        needs_vae=(vae is not None),
+                        needs_vae=(ray_vae is not None),
                     )
                     if prev_cnet is not None:
                         c_net.set_previous_controlnet(prev_cnet)
@@ -1217,6 +1217,36 @@ class RayControlNetApply:
                 c.append(n)
             out.append(c)
         return (out[0], out[1])
+
+
+class RayVAELoader:
+    """Load a VAE model into all Ray workers.
+
+    Loads the VAE on each worker's GPU from disk.  Used by RayControlNetApply
+    when the ControlNet requires a VAE (e.g. for encoding the control image).
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "ray_actors": ("RAY_ACTORS",),
+                "vae_name": (folder_paths.get_filename_list("vae"),),
+            }
+        }
+
+    RETURN_TYPES = ("RAY_VAE",)
+    FUNCTION = "load_vae"
+    CATEGORY = "Raylight"
+
+    def load_vae(self, ray_actors, vae_name):
+        vae_path = folder_paths.get_full_path_or_raise("vae", vae_name)
+
+        gpu_actors = ray_actors["workers"]
+        for actor in gpu_actors:
+            ray.get(actor.ray_vae_loader.remote(vae_path))
+
+        return (vae_path,)
 
 
 class Noise_RandomNoise:
@@ -1365,6 +1395,7 @@ NODE_CLASS_MAPPINGS = {
     "RayLoraLoader": RayLoraLoader,
     "RayControlNetLoader": RayControlNetLoader,
     "RayControlNetApply": RayControlNetApply,
+    "RayVAELoader": RayVAELoader,
     "RayInitializer": RayInitializer,
     "RayInitializerAdvanced": RayInitializerAdvanced,
     "DPNoiseList": DPNoiseList,
@@ -1380,6 +1411,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RayLoraLoader": "Load Lora Model (Ray)",
     "RayControlNetLoader": "Load ControlNet (Ray)",
     "RayControlNetApply": "Apply ControlNet (Ray)",
+    "RayVAELoader": "Load VAE (Ray)",
     "RayInitializer": "Ray Init Actor",
     "RayInitializerAdvanced": "Ray Init Actor (Advanced)",
     "DPNoiseList": "Data Parallel Noise List",
