@@ -45,12 +45,13 @@ class _RayControlNetRef:
     """
 
     def __init__(self, strength, timestep_percent_range, cond_hint_original,
-                 extra_concat_orig=None, previous_controlnet=None):
+                 extra_concat_orig=None, previous_controlnet=None, needs_vae=False):
         self.strength = strength
         self.timestep_percent_range = timestep_percent_range
         self.cond_hint_original = cond_hint_original
         self.extra_concat_orig = list(extra_concat_orig or [])
         self.previous_controlnet = previous_controlnet
+        self.needs_vae = needs_vae
 
         # ControlBase interface stubs needed by ComfyUI internals
         self.cond_hint = None
@@ -80,6 +81,7 @@ class _RayControlNetRef:
             self.cond_hint_original,
             self.extra_concat_orig,
             self.previous_controlnet,
+            self.needs_vae,
         )
         return c
 
@@ -102,7 +104,7 @@ class _RayControlNetRef:
         return 0
 
 
-def _restore_controlnet_refs(cond_list, cached_controlnet):
+def _restore_controlnet_refs(cond_list, cached_controlnet, worker_vae=None):
     """Replace _RayControlNetRef placeholders with real ControlNet objects."""
     if cond_list is None or cached_controlnet is None:
         return
@@ -129,6 +131,8 @@ def _restore_controlnet_refs(cond_list, cached_controlnet):
         cnet.timestep_percent_range = control.timestep_percent_range
         if control.extra_concat_orig:
             cnet.extra_concat_orig = list(control.extra_concat_orig)
+        if control.needs_vae and worker_vae is not None:
+            cnet.vae = worker_vae
         if control.previous_controlnet is not None:
             cnet.set_previous_controlnet(control.previous_controlnet)
 
@@ -969,8 +973,8 @@ class RayWorker:
         import comfy.utils as comfy_utils
 
         # Restore ControlNet refs from local cache (loaded by load_controlnet)
-        _restore_controlnet_refs(positive, self.cached_controlnet)
-        _restore_controlnet_refs(negative, self.cached_controlnet)
+        _restore_controlnet_refs(positive, self.cached_controlnet, self.vae_model)
+        _restore_controlnet_refs(negative, self.cached_controlnet, self.vae_model)
 
         latent_image = latent["samples"]
         latent_image = comfy_sample.fix_empty_latent_channels(self.model, latent_image)

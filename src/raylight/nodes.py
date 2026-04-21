@@ -1205,6 +1205,7 @@ class RayControlNetApply:
                         timestep_percent_range=(start_percent, end_percent),
                         cond_hint_original=control_hint,
                         extra_concat_orig=extra_concat,
+                        needs_vae=(vae is not None),
                     )
                     if prev_cnet is not None:
                         c_net.set_previous_controlnet(prev_cnet)
