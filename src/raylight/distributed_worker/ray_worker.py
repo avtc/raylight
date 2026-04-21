@@ -389,6 +389,7 @@ class RayWorker:
         torch.cuda.empty_cache()
         gc.collect()
 
+    def _free_current_model(self):
         """Eagerly free the current model's GPU storage.
 
         Handles both FSDP models (DTensor shards) and non-FSDP models.
