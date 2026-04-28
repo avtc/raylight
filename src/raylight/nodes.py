@@ -1228,10 +1228,12 @@ class DPKSamplerAdvanced:
             """
             )
 
-        # Auto-replicate: if fewer items than GPUs, fill remaining
         num_gpus = len(gpu_actors)
-        if len(latent_image) != num_gpus:
-            latent_image = [latent_image[0]] * num_gpus
+        # Replicate last latent to fill remaining slots, or truncate if too many
+        if len(latent_image) < num_gpus:
+            latent_image = latent_image + [latent_image[-1]] * (num_gpus - len(latent_image))
+        elif len(latent_image) > num_gpus:
+            latent_image = latent_image[:num_gpus]
         if len(positive) == 1:
             positive = positive * num_gpus
         if len(negative) == 1:
@@ -1548,6 +1550,30 @@ class DPConditioningList:
         return (positives, negatives)
 
 
+class DPLatentList:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "latent_0": ("LATENT", {"tooltip": "Latent for GPU 0"}),
+            },
+            "optional": {
+                **{f"latent_{i}": ("LATENT", {"tooltip": f"Latent for GPU {i}"}) for i in range(1, 8)},
+            },
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    OUTPUT_IS_LIST = (True,)
+    FUNCTION = "assemble"
+    CATEGORY = "Raylight"
+
+    def assemble(self, latent_0, **kwargs):
+        latents = [latent_0]
+        for i in range(1, 8):
+            latents.append(kwargs.get(f"latent_{i}", latent_0))
+        return (latents,)
+
+
 class RayVAEDecodeDistributed:
     @classmethod
     def INPUT_TYPES(s):
@@ -1628,6 +1654,7 @@ NODE_CLASS_MAPPINGS = {
     "RayInitializerAdvanced": RayInitializerAdvanced,
     "DPNoiseList": DPNoiseList,
     "DPConditioningList": DPConditioningList,
+    "DPLatentList": DPLatentList,
     "RayVAEDecodeDistributed": RayVAEDecodeDistributed,
 }
 
@@ -1645,5 +1672,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RayInitializerAdvanced": "Ray Init Actor (Advanced)",
     "DPNoiseList": "Data Parallel Noise List",
     "DPConditioningList": "Data Parallel Conditioning List",
+    "DPLatentList": "Data Parallel Latent List",
     "RayVAEDecodeDistributed": "Distributed VAE (Ray)",
 }
