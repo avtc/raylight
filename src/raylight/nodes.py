@@ -971,6 +971,10 @@ class XFuserKSamplerAdvanced:
                 "start_at_step": ("INT", {"default": 0, "min": 0, "max": 10000}),
                 "end_at_step": ("INT", {"default": 10000, "min": 0, "max": 10000}),
                 "return_with_leftover_noise": (["disable", "enable"],),
+                "denoise": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01},
+                ),
             }
         }
 
@@ -1067,6 +1071,10 @@ class UnifiedParallelSampler:
                 "start_at_step": ("INT", {"default": 0, "min": 0, "max": 10000}),
                 "end_at_step": ("INT", {"default": 10000, "min": 0, "max": 10000}),
                 "return_with_leftover_noise": (["disable", "enable"],),
+                "denoise": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01},
+                ),
             }
         }
 
@@ -1104,6 +1112,7 @@ class UnifiedParallelSampler:
         start_at_step = start_at_step[0]
         end_at_step = end_at_step[0]
         return_with_leftover_noise = return_with_leftover_noise[0]
+        denoise = denoise[0]
 
         gc.collect()
         comfy.model_management.unload_all_models()
@@ -1179,6 +1188,10 @@ class DPKSamplerAdvanced:
                 "start_at_step": ("INT", {"default": 0, "min": 0, "max": 10000}),
                 "end_at_step": ("INT", {"default": 10000, "min": 0, "max": 10000}),
                 "return_with_leftover_noise": (["disable", "enable"],),
+                "denoise": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01},
+                ),
             }
         }
 
@@ -1216,6 +1229,7 @@ class DPKSamplerAdvanced:
         start_at_step = start_at_step[0]
         end_at_step = end_at_step[0]
         return_with_leftover_noise = return_with_leftover_noise[0]
+        denoise = denoise[0]
 
         gpu_actors = ray_actors["workers"]
         parallel_dict = ray.get(gpu_actors[0].get_parallel_dict.remote())
