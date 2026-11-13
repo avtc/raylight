@@ -861,9 +861,19 @@ def fsdp_load_diffusion_model(unet_path, rank, device_mesh, is_cpu_offload, mode
 
 
 def load_safetensors_mmap(unet_path):
-    import safetensors.torch
+    """Zero-copy mmap-backed state dict via safe_open views.
 
-    return safetensors.torch.load_file(unet_path, device="cpu")
+    safetensors.torch.load_file() COPIES every tensor into host RAM; safe_open
+    with framework="pt" returns tensors that are views into the read-only file
+    mapping (page cache, shared across processes, not per-process RSS).
+    """
+    from safetensors import safe_open
+
+    sd = {}
+    with safe_open(unet_path, framework="pt", device="cpu") as handle:
+        for key in handle.keys():
+            sd[key] = handle.get_tensor(key)
+    return sd
 
 
 def load_safetensors_mmap_with_metadata(unet_path):
@@ -900,6 +910,31 @@ def lazy_load_diffusion_model(unet_path, model_options={}):
 
     if cast_dtype is not None and hasattr(model, "model"):
         model.model.manual_cast_dtype = cast_dtype
+
+    model.mmap_cache = sd
+    return model
+
+
+def mmap_load_diffusion_model(unet_path, model_options={}):
+    """Load a diffusion model from zero-copy safetensors views (quant-safe).
+
+    Unlike lazy_load_diffusion_model this does NOT wrap the state dict in
+    LazyTensors: quantized checkpoints (quanto/bnb int8) deserialize into
+    custom tensor classes that the lazy wrapper does not understand, so the
+    raw view-backed dict goes straight into comfy's loader. Parameters are
+    still built from the mmap views, so peak host RAM is one param set, not
+    param set + eager state dict copy.
+    """
+    import logging
+
+    import comfy.sd
+
+    sd = load_safetensors_mmap(unet_path)
+
+    model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options.copy())
+    if model is None:
+        logging.error("ERROR UNSUPPORTED DIFFUSION MODEL {}".format(unet_path))
+        raise RuntimeError("ERROR: Could not detect model type of: {}\n{}".format(unet_path, model_detection_error_hint(unet_path, sd)))
 
     model.mmap_cache = sd
     return model

@@ -1052,7 +1052,6 @@ class RayWorker:
             active_key = self._active_model_key(unet_path, model_options)
             use_mmap = (
                 self.config.use_mmap
-                and not self.is_quant
                 and unet_path.lower().endswith(".safetensors")
             )
 
@@ -1091,19 +1090,36 @@ class RayWorker:
             self._invalidate_non_fsdp_cache()
             self._free_cached_aux_models()
             if use_mmap:
-                from raylight.comfy_dist.sd import lazy_load_diffusion_model
+                if self.is_quant:
+                    # Quantized checkpoints (quanto/bnb int8) cannot go through
+                    # the LazyTensor wrapper; use zero-copy mmap views directly.
+                    from raylight.comfy_dist.sd import mmap_load_diffusion_model
 
-                try:
-                    loaded_model = lazy_load_diffusion_model(
-                        unet_path,
-                        model_options=model_options,
-                    )
-                except Exception as exc:
-                    print(f"[RayWorker {self.local_rank}] Lazy safetensor load failed, falling back to eager load: {exc}")
-                    loaded_model = comfy_sd.load_diffusion_model(
-                        unet_path,
-                        model_options=model_options,
-                    )
+                    try:
+                        loaded_model = mmap_load_diffusion_model(
+                            unet_path,
+                            model_options=model_options,
+                        )
+                    except Exception as exc:
+                        print(f"[RayWorker {self.local_rank}] mmap quantized load failed, falling back to eager load: {exc}")
+                        loaded_model = comfy_sd.load_diffusion_model(
+                            unet_path,
+                            model_options=model_options,
+                        )
+                else:
+                    from raylight.comfy_dist.sd import lazy_load_diffusion_model
+
+                    try:
+                        loaded_model = lazy_load_diffusion_model(
+                            unet_path,
+                            model_options=model_options,
+                        )
+                    except Exception as exc:
+                        print(f"[RayWorker {self.local_rank}] Lazy safetensor load failed, falling back to eager load: {exc}")
+                        loaded_model = comfy_sd.load_diffusion_model(
+                            unet_path,
+                            model_options=model_options,
+                        )
             else:
                 loaded_model = comfy_sd.load_diffusion_model(
                     unet_path,
