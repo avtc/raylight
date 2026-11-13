@@ -51,11 +51,13 @@ def _ray_sample_piece(piece, cond_i, ray_actors, noise_seed, sampler, sigmas):
 class RayESRGANDistributed:
     @classmethod
     def INPUT_TYPES(s):
+        import folder_paths
         return {
             "required": {
                 "ray_actors": ("RAY_ACTORS", {"tooltip": "Ray actors to submit the slices to."}),
                 "images": ("IMAGE", {"tooltip": "Source frames (BHWC)."}),
-                "upscale_name": ("COMBO", {"tooltip": "upscale_models folder item."}),
+                "upscale_name": (folder_paths.get_filename_list("upscale_models"),
+                                 {"tooltip": "upscale_models folder item."}),
                 "width": ("INT", {"default": 2560, "min": 64, "max": 8192, "step": 32,
                                   "tooltip": "Target width after x2 + lanczos crop."}),
                 "height": ("INT", {"default": 1440, "min": 64, "max": 8192, "step": 32,
