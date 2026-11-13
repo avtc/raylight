@@ -1252,6 +1252,45 @@ class RayWorker:
     def ray_vae_decode_finalize(self, decoded):
         return ray_vae_decode_finalize_impl(self, decoded)
 
+    # Distributed ESRGAN x2 prep (upstream PR candidate): each actor takes frame slices
+    # (frames are independent for the image upscaler - no temporal overlap needed),
+    # runs the resident spandrel model per frame (512 tiles / 32 overlap) plus a lanczos
+    # crop, and returns fp16 CPU frames. The caller concatenates slices and encodes with
+    # the proven main-process VAE node (exact 17k+5 token contract preserved).
+    def ray_upscale_loader(self, upscale_path):
+        um = getattr(self, "_ray_upscale_model", None)
+        if um is not None and getattr(self, "_ray_upscale_path", None) == upscale_path:
+            return um
+        import comfy.utils as comfy_utils
+        from spandrel import ModelLoader
+        if um is not None:
+            del um
+        torch.cuda.empty_cache()
+        sd = comfy_utils.load_torch_file(upscale_path, safe_load=True)
+        um = ModelLoader().load_from_state_dict(sd).eval().to("cuda:0")
+        self._ray_upscale_model = um
+        self._ray_upscale_path = upscale_path
+        return um
+
+    @patch_ray_tqdm
+    def ray_esrgan_partial(self, images, upscale_path, width, height):
+        """images: BHWC float16 CPU frame slice -> per-frame tiled ESRGAN x2 + lanczos
+        crop; returns the upscaled frames as float16 CPU tensor."""
+        import comfy.utils as comfy_utils
+        um = self.ray_upscale_loader(upscale_path)
+        frames = images.float()
+        outs = []
+        for i in range(frames.shape[0]):
+            f = frames[i].movedim(-1, 0).unsqueeze(0).to("cuda:0")
+            o = comfy_utils.tiled_scale(f, lambda a: um(a.float()), tile_x=512, tile_y=512,
+                                        overlap=32, upscale_amount=um.scale,
+                                        out_channels=3, output_device="cpu")
+            o = comfy_utils.common_upscale(o, int(width), int(height), "lanczos", "center")
+            outs.append(o.squeeze(0))
+        stacked = torch.stack(outs).movedim(1, -1).contiguous()  # [F,H,W,3] CPU
+        print(f"[Raylight][ESRGAN] actor: in={tuple(images.shape)} -> out={tuple(stacked.shape)}", flush=True)
+        return stacked.to(torch.float16)
+
     @ray.method(num_returns=2)
     @patch_ray_tqdm
     def ray_seedvr2_vae_decode_partial(self, samples, tile_size, overlap=64, job_rank=0, job_world_size=1):
