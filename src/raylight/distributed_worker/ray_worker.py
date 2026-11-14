@@ -198,6 +198,14 @@ def _enable_worker_dynamic_vram(worker_cli_args=None):
             and comfy_model_management.is_nvidia()
             and not comfy_model_management.is_wsl()
         )
+        # LOCAL PATCH (visibility): log the forwarded flag so no-aimdo runs can be
+        # verified from the worker side (silence otherwise hides the outcome).
+        print(
+            f"[Raylight][AIMDO] worker gate: enable_dynamic_vram={getattr(comfy_args, 'enable_dynamic_vram', None)} "
+            f"disable_dynamic_vram={getattr(comfy_args, 'disable_dynamic_vram', None)} "
+            f"should_enable={should_enable}",
+            flush=True,
+        )
         if not should_enable:
             return
 
