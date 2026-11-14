@@ -570,51 +570,50 @@ def _with_sampling_patches(fn):
 
 
 def _patch_ring_sage_unpack():
-    """LOCAL PATCH (SAGE + ring wrapper): xDiT's xdit_ring_flash_attn_forward unpacks
-    `block_out, block_lse = fn(...)` for every non-FA3 kernel, but yunchang's sage impl
-    honors return_softmax=False (inference) and returns a bare tensor -> ValueError.
-    With ring_degree=1 the loop runs a single step, so LSE is never combined - a dummy
-    satisfies the unpack safely. Guarded by RAYLIGHT_RING1_SAGE_FIX (default on).
+    """LOCAL PATCH (SAGE vs xDiT ring wrapper): xDiT's ring/sync-ulysses path unpacks
+    `block_out, block_lse = fn(...)` and combines LSE across ranks - but yunchang's
+    sage kernels return a bare tensor (no lse), crashing the unpack (or, with a dummy
+    lse, silently corrupting the multi-rank combine). Correct fix: inside the ring
+    module's kernel selection, substitute SAGE -> FLASH (FA returns a proper
+    (out, lse) tuple and is the battle-tested backend here). Non-ring callers keep
+    sage. Loud warnings on both apply and every substitution (capped).
     """
     if os.environ.get("RAYLIGHT_RING1_SAGE_FIX", "1") != "1":
         return
     try:
         from xfuser.core.long_ctx_attention.ring import ring_flash_attn as _rfa
     except Exception as exc:
-        import logging
-        logging.warning(f"[Raylight][SAGE-FIX] xfuser ring module unavailable, "
-                        f"SAGE (out,lse) crash NOT patched: {exc}")
+        logging.warning(f"[Raylight][SAGE-FIX] xfuser ring module unavailable, SAGE ring "
+                        f"crash NOT patched: {exc}")
         return
     _orig = getattr(_rfa, "select_flash_attn_impl", None)
-    if _orig is None or getattr(_orig, "_ring1_sage_fixed", False):
-        import logging
+    if _orig is None or getattr(_orig, "_ring_sage_fixed", False):
         logging.warning("[Raylight][SAGE-FIX] select_flash_attn_impl missing or already "
-                        "patched; SAGE fix not (re)applied")
+                        "patched; fix not (re)applied")
         return
 
-    import torch as _torch
-    _warned = {"n": 0}
+    _sub = {"n": 0}
 
-    def _tuple_safe_select(*args, **kwargs):
-        fn = _orig(*args, **kwargs)
+    def _sage_safe_select(*args, **kwargs):
+        attn_type = args[0] if args else kwargs.get("attn_type")
+        name = getattr(attn_type, "name", str(attn_type)).upper()
+        if "SAGE" in name:
+            try:
+                from yunchang.kernels import AttnType as _AttnType
+                fn = _orig(_AttnType.FLASH_ATTN, *args[1:], **{k: v for k, v in kwargs.items() if k != "attn_type"})
+                _sub["n"] += 1
+                if _sub["n"] <= 3 or _sub["n"] % 1000 == 0:
+                    print(f"[Raylight][SAGE-FIX] ring path: {name} -> FLASH substitution "
+                          f"(sage has no lse) occurrence={_sub['n']}", flush=True)
+                return fn
+            except Exception as exc:
+                logging.warning(f"[Raylight][SAGE-FIX] FA substitution failed, returning "
+                                f"sage as-is (may crash): {exc}")
+        return _orig(*args, **kwargs)
 
-        def _wrapper(*a, **k):
-            r = fn(*a, **k)
-            if _torch.is_tensor(r):
-                _warned["n"] += 1
-                if _warned["n"] <= 3 or _warned["n"] % 1000 == 0:
-                    print(f"[Raylight][SAGE-FIX] kernel returned bare tensor; dummy lse "
-                          f"injected (ring_degree must be 1) occurrence={_warned['n']}",
-                          flush=True)
-                return r, _torch.zeros((), device=r.device, dtype=_torch.float32)
-            return r
-
-        _wrapper._ring1_sage_fixed = True
-        return _wrapper
-
-    _tuple_safe_select._ring1_sage_fixed = True
-    _rfa.select_flash_attn_impl = _tuple_safe_select
-    print("[Raylight][SAGE-FIX] ring select_flash_attn_impl wrapped (single-rank lse dummy)", flush=True)
+    _sage_safe_select._ring_sage_fixed = True
+    _rfa.select_flash_attn_impl = _sage_safe_select
+    print("[Raylight][SAGE-FIX] ring kernel selection wrapped (SAGE->FA inside ring path)", flush=True)
 
 
 class RayWorker:
