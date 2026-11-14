@@ -569,9 +569,46 @@ def _with_sampling_patches(fn):
     return wrapper
 
 
+def _patch_ring_sage_unpack():
+    """LOCAL PATCH (SAGE + ring wrapper): xDiT's xdit_ring_flash_attn_forward unpacks
+    `block_out, block_lse = fn(...)` for every non-FA3 kernel, but yunchang's sage impl
+    honors return_softmax=False (inference) and returns a bare tensor -> ValueError.
+    With ring_degree=1 the loop runs a single step, so LSE is never combined - a dummy
+    satisfies the unpack safely. Guarded by RAYLIGHT_RING1_SAGE_FIX (default on).
+    """
+    if os.environ.get("RAYLIGHT_RING1_SAGE_FIX", "1") != "1":
+        return
+    try:
+        from xfuser.core.long_ctx_attention.ring import ring_flash_attn as _rfa
+    except Exception:
+        return
+    _orig = getattr(_rfa, "select_flash_attn_impl", None)
+    if _orig is None or getattr(_orig, "_ring1_sage_fixed", False):
+        return
+
+    import torch as _torch
+
+    def _tuple_safe_select(*args, **kwargs):
+        fn = _orig(*args, **kwargs)
+
+        def _wrapper(*a, **k):
+            r = fn(*a, **k)
+            if _torch.is_tensor(r):
+                return r, _torch.zeros((), device=r.device, dtype=_torch.float32)
+            return r
+
+        _wrapper._ring1_sage_fixed = True
+        return _wrapper
+
+    _tuple_safe_select._ring1_sage_fixed = True
+    _rfa.select_flash_attn_impl = _tuple_safe_select
+    print("[Raylight][SAGE-FIX] ring select_flash_attn_impl wrapped (single-rank lse dummy)", flush=True)
+
+
 class RayWorker:
     def __init__(self, local_rank, device_id, config: RayWorkerConfig, world_size, group_id=0):
         worker_cli_args = _apply_worker_comfy_cli_args_from_env()
+        _patch_ring_sage_unpack()
         self.model = None
         self.vae_model = None
         self.model_type = None
