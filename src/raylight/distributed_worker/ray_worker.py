@@ -580,13 +580,20 @@ def _patch_ring_sage_unpack():
         return
     try:
         from xfuser.core.long_ctx_attention.ring import ring_flash_attn as _rfa
-    except Exception:
+    except Exception as exc:
+        import logging
+        logging.warning(f"[Raylight][SAGE-FIX] xfuser ring module unavailable, "
+                        f"SAGE (out,lse) crash NOT patched: {exc}")
         return
     _orig = getattr(_rfa, "select_flash_attn_impl", None)
     if _orig is None or getattr(_orig, "_ring1_sage_fixed", False):
+        import logging
+        logging.warning("[Raylight][SAGE-FIX] select_flash_attn_impl missing or already "
+                        "patched; SAGE fix not (re)applied")
         return
 
     import torch as _torch
+    _warned = {"n": 0}
 
     def _tuple_safe_select(*args, **kwargs):
         fn = _orig(*args, **kwargs)
@@ -594,6 +601,11 @@ def _patch_ring_sage_unpack():
         def _wrapper(*a, **k):
             r = fn(*a, **k)
             if _torch.is_tensor(r):
+                _warned["n"] += 1
+                if _warned["n"] <= 3 or _warned["n"] % 1000 == 0:
+                    print(f"[Raylight][SAGE-FIX] kernel returned bare tensor; dummy lse "
+                          f"injected (ring_degree must be 1) occurrence={_warned['n']}",
+                          flush=True)
                 return r, _torch.zeros((), device=r.device, dtype=_torch.float32)
             return r
 
