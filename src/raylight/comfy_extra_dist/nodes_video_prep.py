@@ -55,7 +55,6 @@ class RayESRGANDistributed:
         return {
             "required": {
                 "ray_actors": ("RAY_ACTORS", {"tooltip": "Ray actors to submit the slices to."}),
-                "images": ("IMAGE", {"tooltip": "Source frames (BHWC)."}),
                 "upscale_name": (folder_paths.get_filename_list("upscale_models"),
                                  {"tooltip": "upscale_models folder item."}),
                 "width": ("INT", {"default": 2560, "min": 64, "max": 8192, "step": 32,
@@ -64,14 +63,20 @@ class RayESRGANDistributed:
                                    "tooltip": "Target height after x2 + lanczos crop."}),
                 "slice_frames": ("INT", {"default": 28, "min": 4, "max": 128,
                                          "tooltip": "Frames per actor slice; slices need no temporal overlap."}),
-            }
+            },
+            "optional": {
+                "images": ("IMAGE", {"tooltip": "Legacy path: whole-video BHWC tensor resident on the driver."}),
+                "video_path": ("STRING", {"tooltip": "Streaming path (input-relative or absolute): decoded "
+                                                     "slice-by-slice with PyAV so the full video is never "
+                                                     "resident in driver RAM. Use for long takes."}),
+            },
         }
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "run"
     CATEGORY = "Raylight/extra/video"
 
-    def run(self, ray_actors, images, upscale_name, width, height, slice_frames):
+    def run(self, ray_actors, upscale_name, width, height, slice_frames, images=None, video_path=None):
         import folder_paths
         gpu_actors = ray_actors["workers"]
         if not gpu_actors:
@@ -79,21 +84,57 @@ class RayESRGANDistributed:
         upscale_path = folder_paths.get_full_path_or_raise("upscale_models", upscale_name)
         import time
         t0 = time.monotonic()
-        total = int(images.shape[0])
         n = len(gpu_actors)
-        slices = [(s, min(s + slice_frames, total)) for s in range(0, total, slice_frames)]
-        half = images.to(torch.float16).cpu()
-        futures = []
-        for i, (s, e) in enumerate(slices):
-            actor = gpu_actors[i % n]
-            futures.append((s, actor.ray_esrgan_partial.remote(
-                half[s:e], upscale_path, int(width), int(height))))
-        parts = []
-        for s, fut in futures:
-            parts.append((s, ray.get(fut)))
-        parts.sort(key=lambda x: x[0])
-        out = torch.cat([p for _, p in parts], dim=0).float()
-        print(f"[Raylight][ESRGAN] {total}f x{n} actors in {time.monotonic()-t0:.1f}s", flush=True)
+        parts = []       # futures in submit order
+        expected = None  # frame count when known
+
+        def submit(slice_fp16, i):
+            return gpu_actors[i % n].ray_esrgan_partial.remote(
+                slice_fp16, upscale_path, int(width), int(height))
+
+        if video_path:
+            import av
+            import numpy as np
+            path = folder_paths.get_annotated_filepath(video_path)
+            container = av.open(path)
+            container.streams.video[0].thread_type = "AUTO"
+            pending = []  # at most n+1 slices in flight
+            i = 0
+            buf = []
+            for frame in container.decode(video=0):
+                buf.append(torch.from_numpy(
+                    np.asarray(frame.to_ndarray(format="rgb24"))).to(torch.float16).div_(255.0))
+                if len(buf) == slice_frames:
+                    pending.append(submit(torch.stack(buf), i)); i += 1; buf = []
+                    if len(pending) > n:
+                        parts.append(pending.pop(0))
+            if buf:
+                pending.append(submit(torch.stack(buf), i)); i += 1
+            while pending:
+                parts.append(pending.pop(0))
+            container.close()
+        else:
+            if images is None:
+                raise ValueError("RayESRGANDistributed: provide either images or video_path")
+            expected = int(images.shape[0])
+            s = 0
+            i = 0
+            pending = []
+            while s < expected:
+                e = min(s + slice_frames, expected)
+                pending.append(submit(images[s:e].to(torch.float16), i))  # per-slice convert, no full copy
+                i += 1; s = e
+                if len(pending) > n:
+                    parts.append(pending.pop(0))
+            while pending:
+                parts.append(pending.pop(0))
+
+        outs = [ray.get(f) for f in parts]
+        out = torch.cat(outs, dim=0)  # fp16 stays: downstream vae.encode casts to its dtype
+        if expected is not None and int(out.shape[0]) != expected:
+            raise ValueError(f"ESRGAN slice loss: {out.shape[0]} != {expected}")
+        print(f"[Raylight][ESRGAN] {int(out.shape[0])}f x{n} actors in {time.monotonic()-t0:.1f}s"
+              f"{' [streamed]' if video_path else ''}", flush=True)
         return (out,)
 
 

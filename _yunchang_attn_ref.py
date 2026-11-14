@@ -1,0 +1,634 @@
+import math
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+
+import torch
+_scaled_dot_product_flash_attention = torch.ops.aten._scaled_dot_product_flash_attention
+_scaled_dot_product_efficient_attention = torch.ops.aten._scaled_dot_product_efficient_attention
+
+# Apply Moore Threads PyTorch Patches. It will not interfere CUDA setup if you are
+# not running in Moore Threads's environment.
+try:
+    import torch_musa
+    _scaled_dot_product_flash_attention = torch.ops.aten._scaled_dot_product_attention_flash_musa
+    # The efficient operator hasn't been implemented yet
+    _scaled_dot_product_efficient_attention = None
+except ModuleNotFoundError:
+    pass
+
+from yunchang.globals import (
+    HAS_FLASH_ATTN,
+    HAS_FLASH_ATTN_HOPPER,
+    HAS_FLASHINFER,
+    HAS_AITER,
+    HAS_NPU,
+    HAS_XPU,
+)
+
+if HAS_AITER:
+    import aiter
+    from aiter import flash_attn_func as flash_attn_func_aiter
+
+if HAS_FLASH_ATTN:
+    import flash_attn
+    from flash_attn.flash_attn_interface import _flash_attn_forward, _flash_attn_backward
+
+if HAS_FLASH_ATTN_HOPPER:
+    from flash_attn_interface import _flash_attn_forward as flash_attn_forward_hopper
+    from flash_attn_interface import _flash_attn_backward as flash_attn_func_hopper_backward
+    from flash_attn_interface import flash_attn_func as flash3_attn_func
+else:
+    flash_attn_forward_hopper = None
+    flash_attn_func_hopper_backward = None
+    flash3_attn_func = None
+
+if HAS_FLASHINFER:
+    from flashinfer.prefill import single_prefill_with_kv_cache
+    _LOG2_E = math.log2(math.e)
+
+if HAS_NPU:
+    import torch_npu
+
+def pytorch_attn_forward(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    dropout_p=0.0,
+    softmax_scale=None,
+    causal=True,
+    window_size=(-1, -1),
+    softcap=None,
+    alibi_slopes=None,
+    return_softmax=False,
+    op_type="flash",
+):
+    assert op_type in ["flash", "efficient", "math", "cudnn"], f"Invalid op_type: {op_type}"
+    """
+    q shape (bs, seqlen, nhead, hs)
+    k shape (bs, seqlen, nhead, hs)
+    v shape (bs, seqlen, nhead, hs)
+    """
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
+
+    if op_type == "flash":
+        out, lse = _scaled_dot_product_flash_attention(
+            q,
+            k,
+            v,
+            dropout_p=dropout_p,
+            is_causal=causal,
+            scale=softmax_scale,
+        )[:2]
+    elif op_type == "efficient":
+        out, lse = _scaled_dot_product_efficient_attention(
+            q,
+            k,
+            v,
+            attn_bias=None,
+            compute_log_sumexp=True,
+            dropout_p=dropout_p,
+            is_causal=causal,
+            scale=softmax_scale,
+        )[:2]
+    elif op_type == "math":
+        # Use PyTorch's scaled_dot_product_attention with MATH backend
+        if hasattr(torch.nn.attention, 'sdpa_kernel'):
+            with torch.nn.attention.sdpa_kernel(backends=[torch.nn.attention.SDPBackend.MATH]):
+                out = torch.nn.functional.scaled_dot_product_attention(
+                    q, k, v,
+                    attn_mask=None,
+                    dropout_p=dropout_p,
+                    is_causal=causal,
+                    scale=softmax_scale,
+                )
+        else:
+            # Fallback for older PyTorch versions
+            out = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=None,
+                dropout_p=dropout_p,
+                is_causal=causal,
+                scale=softmax_scale,
+            )
+        # For math backend, LSE is not available, use zeros as fallback
+        lse = torch.zeros(q.shape[0], q.shape[1], q.shape[2], dtype=q.dtype, device=q.device)
+    elif op_type == "cudnn":
+        # Use PyTorch's scaled_dot_product_attention with CUDNN backend
+        if hasattr(torch.nn.attention, 'sdpa_kernel'):
+            with torch.nn.attention.sdpa_kernel(backends=[torch.nn.attention.SDPBackend.CUDNN_ATTENTION]):
+                out = torch.nn.functional.scaled_dot_product_attention(
+                    q, k, v,
+                    attn_mask=None,
+                    dropout_p=dropout_p,
+                    is_causal=causal,
+                    scale=softmax_scale,
+                )
+        else:
+            # Fallback for older PyTorch versions
+            out = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=None,
+                dropout_p=dropout_p,
+                is_causal=causal,
+                scale=softmax_scale,
+            )
+        # For cudnn backend, LSE is not available, use zeros as fallback
+        lse = torch.zeros(q.shape[0], q.shape[1], q.shape[2], dtype=q.dtype, device=q.device)
+    else:
+        raise ValueError(f"Invalid op_type: {op_type}")
+
+    out = out.transpose(1, 2)
+    lse = lse.to(q.dtype)
+    return out, lse
+
+def pytorch_attn_backward(
+    dout,
+    q,
+    k,
+    v,
+    out,
+    softmax_lse,
+    block_dq_buffer=None,  # Add new parameters with default values
+    block_dk_buffer=None,
+    block_dv_buffer=None,
+    dropout_p=0.0,
+    softmax_scale=None,
+    bwd_causal=None,  # This will replace the original causal parameter
+    window_size=None,
+    softcap=None,
+    alibi_slopes=None,
+    deterministic=True,
+    rng_state=None,
+    *args,
+    **kwargs,
+):
+    raise RuntimeError("Not implemented backward for PyTorch attention types")
+    # TODO(optim): use pytorch _scaled_dot_product_efficient_attention_backward
+    # Use efficient attention backward
+    # https://github.com/pytorch/pytorch/blob/main/tools/autograd/derivatives.yaml#L2874
+
+
+def flash_attn_forward(q, k, v,
+        dropout_p = 0.0,
+        softmax_scale = None,
+        causal=False,
+        window_size=(-1, -1),
+        softcap=None,
+        alibi_slopes=None,
+        return_softmax=False):
+    assert HAS_FLASH_ATTN, "FlashAttention is not available"
+    if softmax_scale is None:
+        softmax_scale = q.shape[-1] ** (-0.5)
+    if flash_attn.__version__ <= '2.6.3':
+        block_out, _, _, _, _, block_lse, _, _ = _flash_attn_forward(
+            q,
+            k,
+            v,
+            dropout_p = dropout_p,
+            softmax_scale = softmax_scale,
+            causal=causal,
+            window_size=window_size,
+            softcap=softcap,
+            alibi_slopes=alibi_slopes,
+            return_softmax=return_softmax,
+        )
+    else:
+        block_out, block_lse, _, _ = _flash_attn_forward(
+            q,
+            k,
+            v,
+            dropout_p = dropout_p,
+            softmax_scale = softmax_scale,
+            causal=causal,
+            window_size_left=window_size[0],
+            window_size_right=window_size[1],
+            softcap=softcap,
+            alibi_slopes=alibi_slopes,
+            return_softmax=return_softmax,
+        )
+    return block_out, block_lse
+
+def flash_attn_backward(dout, q, k, v, out, softmax_lse, block_dq_buffer, block_dk_buffer, block_dv_buffer, dropout_p, softmax_scale,
+    bwd_causal, window_size, softcap, alibi_slopes, deterministic, rng_state):
+    if softmax_scale is None:
+        softmax_scale = q.shape[-1] ** (-0.5)
+    assert HAS_FLASH_ATTN
+    if flash_attn.__version__ <= '2.6.3':
+        _flash_attn_backward(
+            dout,
+            q,
+            k,
+            v,
+            out,
+            softmax_lse,
+            block_dq_buffer,
+            block_dk_buffer,
+            block_dv_buffer,
+            dropout_p,
+            softmax_scale,
+            bwd_causal,
+            window_size,
+            softcap,
+            alibi_slopes,
+            deterministic,
+            rng_state,
+        )
+    else:
+        _flash_attn_backward(
+            dout,
+            q,
+            k,
+            v,
+            out,
+            softmax_lse,
+            block_dq_buffer,
+            block_dk_buffer,
+            block_dv_buffer,
+            dropout_p,
+            softmax_scale,
+            bwd_causal,
+            window_size[0],  # Pass window_size_left
+            window_size[1],  # Pass window_size_right
+            softcap,
+            alibi_slopes,
+            deterministic,
+            rng_state,
+        )
+
+
+def flash_attn3_func_forward(q, k, v, dropout_p, softmax_scale, causal, window_size, softcap, alibi_slopes, return_softmax):
+    assert HAS_FLASH_ATTN_HOPPER
+    # current signature of flash_attn_forward_hopper:
+    # (q, k, v, softmax_scale, causal, window_size, descale_q=None, descale_k=None, descale_v=None, gqa_parallel=False)
+
+    out, softmax_lse, *unused = flash_attn_forward_hopper(
+                    q=q,
+                    k=k,
+                    v=v,
+                    k_new=None,
+                    v_new=None,
+                    qv=None,
+                    out=None,
+                    cu_seqlens_q=None,
+                    cu_seqlens_k=None,
+                    cu_seqlens_k_new=None,
+                    seqused_q=None,
+                    seqused_k=None,
+                    max_seqlen_q=None,
+                    max_seqlen_k=None,
+                    page_table=None,
+                    kv_batch_idx=None,
+                    leftpad_k=None,
+                    rotary_cos=None,
+                    rotary_sin=None,
+                    seqlens_rotary=None,
+                    q_descale=None,
+                    k_descale=None,
+                    v_descale=None,
+                    softmax_scale=softmax_scale,
+                    causal=False,
+                    window_size=(-1, -1),
+                    attention_chunk=0,
+                    softcap=0.0,
+                    rotary_interleaved=True,
+                    scheduler_metadata=None,
+                    num_splits=0,
+                    pack_gqa=None,
+                    sm_margin=0,
+                )
+
+    return out, softmax_lse
+
+def flash_attn3_func_backward(dout, q, k, v, out, softmax_lse,
+                                    block_dq_buffer, block_dk_buffer, block_dv_buffer,
+                                    dropout_p, softmax_scale,
+                                    bwd_causal, window_size, softcap, alibi_slopes, deterministic, rng_state):
+    # (dout, q, k, v, out, softmax_lse, dq, dk, dv, softmax_scale, causal):
+    assert HAS_FLASH_ATTN_HOPPER, f"FlashAttention Hopper is not available"
+
+    flash_attn_func_hopper_backward(
+        dout,
+        q,
+        k,
+        v,
+        out,
+        softmax_lse,
+        cu_seqlens_q=None,
+        cu_seqlens_k=None,
+        sequed_q=None,
+        sequed_k=None,
+        max_seqlen_q=None,
+        max_seqlen_k=None,
+        dq=block_dq_buffer,
+        dk=block_dk_buffer,
+        dv=block_dv_buffer,
+        softmax_scale=softmax_scale,
+        causal=False,
+        window_size=(-1, -1),
+        softcap=0.0,
+        deterministic=False,
+        sm_margin=0,
+    )
+
+def flash_attn_forward_aiter(q, k, v,
+    dropout_p = 0.0,
+    softmax_scale = None,
+    causal=False,
+    window_size=(-1, -1),
+    softcap=None,
+    alibi_slopes=None,
+    return_softmax=False
+):
+    assert HAS_AITER, "Aiter is not available"
+    block_out, block_lse = flash_attn_func_aiter(
+        q,
+        k,
+        v,
+        dropout_p = dropout_p,
+        softmax_scale = softmax_scale,
+        causal = causal,
+        window_size=window_size,
+        alibi_slopes = alibi_slopes,
+        return_lse=True,
+    )
+
+    return block_out, block_lse
+
+def flashinfer_attn_forward(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    dropout_p: float = 0.0,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+    window_size: Tuple[int, int] = (-1, -1),
+    softcap: Optional[float] = None,
+    alibi_slopes: Optional[torch.Tensor] = None,
+    return_softmax: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    assert HAS_FLASHINFER, "FlashInfer is not available"
+    if q.ndim == 4:
+        if q.shape[0] >1:
+            raise ValueError("batch size > 1 is not supported")
+        out, lse = single_prefill_with_kv_cache(
+            q[0],
+            k[0],
+            v[0],
+            sm_scale=softmax_scale,
+            causal=causal,
+            logits_soft_cap=softcap,
+            window_left=window_size[0],
+            return_lse=True,
+        )
+        lse = lse.transpose(0, 1)
+        out, lse = out.unsqueeze(0),lse.unsqueeze(0)
+    elif q.ndim == 3:
+        out, lse = single_prefill_with_kv_cache(
+            q,
+            k,
+            v,
+            sm_scale=softmax_scale,
+            causal=causal,
+            logits_soft_cap=softcap,
+            window_left=window_size[0],
+            return_lse=True,
+        )
+        lse = lse.transpose(0, 1)
+    else:
+        raise ValueError(f"Invalid input shape: {q.shape}")
+    lse = lse / _LOG2_E
+    return out, lse
+
+
+def flashinfer_attn_backbward(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    dropout_p: float = 0.0,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+    window_size: Tuple[int, int] = (-1, -1),
+    softcap: Optional[float] = None,
+    alibi_slopes: Optional[torch.Tensor] = None,
+    return_softmax: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    raise RuntimeError("Not implemented backward for AttnType.FLASHINFER")
+ActualSeqLen = Optional[Union[torch.Tensor, Sequence[int]]]
+RNGState = Tuple[int, int, int]
+
+_CAUSAL_MASK_CACHE: Dict[Tuple[str, Optional[int]], torch.Tensor] = {}
+
+
+def _causal_mask(device: torch.device) -> torch.Tensor:
+    key = (device.type, device.index)
+    mask = _CAUSAL_MASK_CACHE.get(key)
+    if mask is None:
+        mask = torch.triu(
+            torch.ones(
+                (2048, 2048),
+                dtype=torch.bool,
+                device=device,
+            ),
+            diagonal=1,
+        )
+        _CAUSAL_MASK_CACHE[key] = mask
+    return mask
+
+
+def _head_num(q: torch.Tensor, input_layout: str) -> int:
+    if input_layout == "TND":
+        return q.shape[1]
+    if input_layout == "BSND":
+        return q.shape[2]
+    if input_layout == "BNSD":
+        return q.shape[1]
+    raise ValueError(f"unsupported input_layout: {input_layout!r}")
+
+
+def _to_npu_actual_seq_len(
+    actual_seq_len: ActualSeqLen,
+) -> Optional[List[int]]:
+    """Convert cumulative endpoints to torch_npu's required Python list."""
+    if actual_seq_len is None:
+        return None
+    if isinstance(actual_seq_len, torch.Tensor):
+        values = actual_seq_len.detach().to(device="cpu", dtype=torch.long)
+    else:
+        values = torch.as_tensor(actual_seq_len, dtype=torch.long, device="cpu")
+    if values.ndim != 1 or values.numel() == 0:
+        raise ValueError("actual_seq_len must be a non-empty 1-D sequence")
+    if values[0].item() == 0:
+        values = values[1:]
+    if (
+        values.numel() == 0
+        or (values <= 0).any()
+        or (values[1:] < values[:-1]).any()
+    ):
+        raise ValueError(
+            "actual_seq_len must contain positive, non-decreasing endpoints"
+        )
+    return [int(value) for value in values.tolist()]
+
+
+def npu_fused_attn_forward(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    softmax_scale: Optional[float] = None,
+    dropout_p: float = 0.0,
+    causal: bool = False,
+    input_layout: str = "BSND",
+    actual_seq_qlen: ActualSeqLen = None,
+    actual_seq_kvlen: ActualSeqLen = None,
+    softmax_layout: str = "",
+    **kwargs: Any,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, RNGState]:
+    if not HAS_NPU:
+        raise RuntimeError("torch_npu is not available")
+    if softmax_scale is None:
+        softmax_scale = q.shape[-1] ** -0.5
+    attention_mask = _causal_mask(q.device) if causal else None
+    sparse_mode = 2 if causal else 0
+    actual_seq_qlen = _to_npu_actual_seq_len(actual_seq_qlen)
+    actual_seq_kvlen = _to_npu_actual_seq_len(actual_seq_kvlen)
+    (
+        block_out,
+        block_max,
+        block_sum,
+        _,
+        seed,
+        offset,
+        numels,
+    ) = torch_npu.npu_fusion_attention(
+        q,
+        k,
+        v,
+        head_num=_head_num(q, input_layout),
+        input_layout=input_layout,
+        softmax_layout=softmax_layout,
+        atten_mask=attention_mask,
+        scale=softmax_scale,
+        keep_prob=1.0 - dropout_p,
+        actual_seq_qlen=actual_seq_qlen,
+        actual_seq_kvlen=actual_seq_kvlen,
+        sparse_mode=sparse_mode,
+    )
+    return block_out, block_max, block_sum, (seed, offset, numels)
+
+
+def npu_fused_attn_backward(
+    dout: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    attention_in: torch.Tensor,
+    softmax_max: torch.Tensor,
+    softmax_sum: torch.Tensor,
+    softmax_scale: float,
+    dropout_p: float,
+    causal: bool,
+    rng_state: RNGState,
+    input_layout: str = "BSND",
+    actual_seq_qlen: ActualSeqLen = None,
+    actual_seq_kvlen: ActualSeqLen = None,
+    softmax_layout: str = "",
+    **kwargs: Any,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if not HAS_NPU:
+        raise RuntimeError("torch_npu is not available")
+    attention_mask = _causal_mask(q.device) if causal else None
+    sparse_mode = 2 if causal else 0
+    keep_prob = 1 - dropout_p
+    actual_seq_qlen = _to_npu_actual_seq_len(actual_seq_qlen)
+    actual_seq_kvlen = _to_npu_actual_seq_len(actual_seq_kvlen)
+    seed, offset, numels = rng_state
+    # The ring merge stores max/sum without the NPU alignment dimension.
+    if softmax_max.ndim == q.ndim - 1:
+        softmax_max = (
+            softmax_max.unsqueeze(-1)
+            .expand(*softmax_max.shape, 8)
+            .contiguous()
+        )
+        softmax_sum = (
+            softmax_sum.unsqueeze(-1)
+            .expand(*softmax_sum.shape, 8)
+            .contiguous()
+        )
+    dq, dk, dv, *_ = torch_npu.npu_fusion_attention_grad(
+        q,
+        k,
+        v,
+        dout,
+        head_num=_head_num(q, input_layout),
+        input_layout=input_layout,
+        atten_mask=attention_mask,
+        softmax_max=softmax_max,
+        softmax_sum=softmax_sum,
+        attention_in=attention_in,
+        scale_value=softmax_scale,
+        keep_prob=keep_prob,
+        seed=seed,
+        offset=offset,
+        numels=numels,
+        softmax_layout=softmax_layout,
+        actual_seq_qlen=actual_seq_qlen,
+        actual_seq_kvlen=actual_seq_kvlen,
+        sparse_mode=sparse_mode,
+    )
+    return dq, dk, dv
+
+
+def xpu_flash_attn_forward(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    dropout_p: float = 0.0,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+    window_size: Tuple[int, int] = (-1, -1),
+    softcap: Optional[float] = None,
+    alibi_slopes=None,
+    return_softmax: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    assert HAS_XPU, "sgl_kernel XPU flash attention is not available"
+    from sgl_kernel.flash_attn import flash_attn_varlen_func
+
+    if softmax_scale is None:
+        softmax_scale = q.shape[-1] ** (-0.5)
+
+    # q/k/v: (bs, seqlen, nheads, headdim) -> (bs*seqlen, nheads, headdim)
+    bs, seqlen, nheads, headdim = q.shape
+    q_flat = q.reshape(bs * seqlen, nheads, headdim).contiguous()
+    k_flat = k.reshape(bs * seqlen, nheads, headdim).contiguous()
+    v_flat = v.reshape(bs * seqlen, nheads, headdim).contiguous()
+
+    cu_seqlens = torch.arange(
+        0, (bs + 1) * seqlen, seqlen, dtype=torch.int32, device=q.device
+    )
+
+    out_flat, lse_flat, *rest = flash_attn_varlen_func(
+        q_flat,
+        k_flat,
+        v_flat,
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_k=cu_seqlens,
+        max_seqlen_q=seqlen,
+        max_seqlen_k=seqlen,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        window_size=window_size,
+        softcap=softcap if softcap is not None else 0.0,
+        return_softmax_lse=True,
+    )
+
+    # out_flat: (bs*seqlen, nheads, headdim) -> (bs, seqlen, nheads, headdim)
+    out = out_flat.reshape(bs, seqlen, nheads, headdim)
+    # lse_flat: (nheads, bs*seqlen) -> (bs, nheads, seqlen)
+    lse = lse_flat.reshape(nheads, bs, seqlen).permute(1, 0, 2)
+
+    return out, lse
+
+
+def xpu_flash_attn_backward(*args, **kwargs):
+    raise RuntimeError("Backward pass is not supported for XPU flash attention")
