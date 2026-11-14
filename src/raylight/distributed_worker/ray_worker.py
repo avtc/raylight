@@ -600,7 +600,12 @@ def _patch_ring_sage_unpack():
         if "SAGE" in name:
             try:
                 from yunchang.kernels import AttnType as _AttnType
-                fn = _orig(_AttnType.FLASH_ATTN, *args[1:], **{k: v for k, v in kwargs.items() if k != "attn_type"})
+                _fa = next((getattr(_AttnType, n) for n in ("FA", "FLASH_ATTN", "FLASH")
+                            if hasattr(_AttnType, n)), None)
+                if _fa is None:
+                    raise AttributeError(
+                        f"no FA member in AttnType; available={[m.name for m in _AttnType]}")
+                fn = _orig(_fa, *args[1:], **{k: v for k, v in kwargs.items() if k != "attn_type"})
                 _sub["n"] += 1
                 if _sub["n"] <= 3 or _sub["n"] % 1000 == 0:
                     print(f"[Raylight][SAGE-FIX] ring path: {name} -> FLASH substitution "
